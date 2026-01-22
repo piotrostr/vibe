@@ -50,6 +50,18 @@ impl TaskStatus {
             _ => None,
         }
     }
+
+    /// Convert Linear state type to TaskStatus
+    pub fn from_linear_state_type(state_type: &str) -> Self {
+        match state_type {
+            "backlog" => TaskStatus::Backlog,
+            "unstarted" => TaskStatus::Todo,
+            "started" => TaskStatus::Inprogress,
+            "completed" => TaskStatus::Done,
+            "canceled" | "cancelled" => TaskStatus::Cancelled,
+            _ => TaskStatus::Backlog,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +93,7 @@ pub struct Task {
     pub pr_has_conflicts: Option<bool>,
 }
 
-use crate::external::BranchPrInfo;
+use crate::external::{BranchPrInfo, LinearIssueStatus};
 
 impl Task {
     pub fn effective_status(&self) -> TaskStatus {
@@ -104,7 +116,9 @@ impl Task {
         &self,
         branch_pr: Option<&BranchPrInfo>,
         has_worktree: bool,
+        linear_status: Option<&LinearIssueStatus>,
     ) -> TaskStatus {
+        // Priority 1: PR status (merged/closed/open) - concrete git state
         if self.pr_status.is_some() {
             return self.effective_status();
         }
@@ -125,10 +139,26 @@ impl Task {
             }
         }
 
+        // Priority 2: Linear terminal states (completed/cancelled) override worktree
+        if let Some(linear) = linear_status {
+            match linear.state_type.as_str() {
+                "completed" => return TaskStatus::Done,
+                "canceled" => return TaskStatus::Cancelled,
+                _ => {}
+            }
+        }
+
+        // Priority 3: Worktree presence upgrades backlog/unstarted to in-progress
         if has_worktree {
             return TaskStatus::Inprogress;
         }
 
+        // Priority 4: Linear non-terminal status
+        if let Some(linear) = linear_status {
+            return TaskStatus::from_linear_state_type(&linear.state_type);
+        }
+
+        // Priority 5: Local stored status - fallback
         self.status
     }
 }
@@ -162,6 +192,7 @@ impl TasksState {
         status: TaskStatus,
         branch_prs: &std::collections::HashMap<String, BranchPrInfo>,
         worktrees: &[crate::external::WorktreeInfo],
+        linear_statuses: &std::collections::HashMap<String, LinearIssueStatus>,
     ) -> Vec<&Task> {
         let column_index = status.column_index();
         self.tasks
@@ -175,7 +206,11 @@ impl TasksState {
 
                 let has_worktree = matching_branch.is_some();
                 let branch_pr = matching_branch.and_then(|wt| branch_prs.get(&wt.branch));
-                t.effective_status_with_pr(branch_pr, has_worktree)
+                let linear_status = t
+                    .linear_issue_id
+                    .as_ref()
+                    .and_then(|id| linear_statuses.get(id));
+                t.effective_status_with_pr(branch_pr, has_worktree, linear_status)
                     .column_index()
                     == column_index
             })
@@ -196,9 +231,10 @@ impl TasksState {
         &self,
         branch_prs: &std::collections::HashMap<String, BranchPrInfo>,
         worktrees: &[crate::external::WorktreeInfo],
+        linear_statuses: &std::collections::HashMap<String, LinearIssueStatus>,
     ) -> Option<&Task> {
         let status = TaskStatus::from_column_index(self.selected_column)?;
-        let tasks = self.tasks_in_column_with_prs(status, branch_prs, worktrees);
+        let tasks = self.tasks_in_column_with_prs(status, branch_prs, worktrees, linear_statuses);
         let card_index = self.selected_card_per_column[self.selected_column];
         tasks.get(card_index).copied()
     }
@@ -207,10 +243,11 @@ impl TasksState {
         &mut self,
         branch_prs: &std::collections::HashMap<String, BranchPrInfo>,
         worktrees: &[crate::external::WorktreeInfo],
+        linear_statuses: &std::collections::HashMap<String, LinearIssueStatus>,
     ) {
         if let Some(status) = TaskStatus::from_column_index(self.selected_column) {
             let count = self
-                .tasks_in_column_with_prs(status, branch_prs, worktrees)
+                .tasks_in_column_with_prs(status, branch_prs, worktrees, linear_statuses)
                 .len();
             if count > 0 {
                 let current = self.selected_card_per_column[self.selected_column];
@@ -231,10 +268,11 @@ impl TasksState {
         &mut self,
         branch_prs: &std::collections::HashMap<String, BranchPrInfo>,
         worktrees: &[crate::external::WorktreeInfo],
+        linear_statuses: &std::collections::HashMap<String, LinearIssueStatus>,
     ) {
         if let Some(status) = TaskStatus::from_column_index(self.selected_column) {
             let count = self
-                .tasks_in_column_with_prs(status, branch_prs, worktrees)
+                .tasks_in_column_with_prs(status, branch_prs, worktrees, linear_statuses)
                 .len();
             if count > 0 {
                 let current = self.selected_card_per_column[self.selected_column];
@@ -244,7 +282,12 @@ impl TasksState {
                     // Select last card in new row
                     if let Some(new_status) = TaskStatus::from_column_index(self.selected_column) {
                         let new_count = self
-                            .tasks_in_column_with_prs(new_status, branch_prs, worktrees)
+                            .tasks_in_column_with_prs(
+                                new_status,
+                                branch_prs,
+                                worktrees,
+                                linear_statuses,
+                            )
                             .len();
                         if new_count > 0 {
                             self.selected_card_per_column[self.selected_column] = new_count - 1;
@@ -369,18 +412,152 @@ mod tests {
 
         let empty_prs = std::collections::HashMap::new();
         let empty_wt: Vec<crate::external::WorktreeInfo> = vec![];
+        let empty_linear: std::collections::HashMap<String, LinearIssueStatus> =
+            std::collections::HashMap::new();
 
-        let in_progress =
-            state.tasks_in_column_with_prs(TaskStatus::Inprogress, &empty_prs, &empty_wt);
+        let in_progress = state.tasks_in_column_with_prs(
+            TaskStatus::Inprogress,
+            &empty_prs,
+            &empty_wt,
+            &empty_linear,
+        );
         assert_eq!(in_progress.len(), 1);
         assert_eq!(in_progress[0].id, "task1");
 
-        let in_review = state.tasks_in_column_with_prs(TaskStatus::Inreview, &empty_prs, &empty_wt);
+        let in_review = state.tasks_in_column_with_prs(
+            TaskStatus::Inreview,
+            &empty_prs,
+            &empty_wt,
+            &empty_linear,
+        );
         assert_eq!(in_review.len(), 1);
         assert_eq!(in_review[0].id, "task2");
 
-        let done = state.tasks_in_column_with_prs(TaskStatus::Done, &empty_prs, &empty_wt);
+        let done =
+            state.tasks_in_column_with_prs(TaskStatus::Done, &empty_prs, &empty_wt, &empty_linear);
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].id, "task3");
+    }
+
+    #[test]
+    fn test_from_linear_state_type() {
+        assert_eq!(
+            TaskStatus::from_linear_state_type("backlog"),
+            TaskStatus::Backlog
+        );
+        assert_eq!(
+            TaskStatus::from_linear_state_type("unstarted"),
+            TaskStatus::Todo
+        );
+        assert_eq!(
+            TaskStatus::from_linear_state_type("started"),
+            TaskStatus::Inprogress
+        );
+        assert_eq!(
+            TaskStatus::from_linear_state_type("completed"),
+            TaskStatus::Done
+        );
+        assert_eq!(
+            TaskStatus::from_linear_state_type("canceled"),
+            TaskStatus::Cancelled
+        );
+        assert_eq!(
+            TaskStatus::from_linear_state_type("cancelled"),
+            TaskStatus::Cancelled
+        );
+        assert_eq!(
+            TaskStatus::from_linear_state_type("unknown"),
+            TaskStatus::Backlog
+        );
+    }
+
+    #[test]
+    fn test_effective_status_with_linear() {
+        let mut task = make_task(TaskStatus::Backlog);
+        task.linear_issue_id = Some("VIB-6".to_string());
+
+        // Without Linear status, should return local status
+        assert_eq!(
+            task.effective_status_with_pr(None, false, None),
+            TaskStatus::Backlog
+        );
+
+        // With Linear status "started", should return InProgress
+        let linear_status = LinearIssueStatus {
+            identifier: "VIB-6".to_string(),
+            state_type: "started".to_string(),
+            state_name: "In Progress".to_string(),
+        };
+        assert_eq!(
+            task.effective_status_with_pr(None, false, Some(&linear_status)),
+            TaskStatus::Inprogress
+        );
+
+        // With Linear status "completed", should return Done
+        let linear_done = LinearIssueStatus {
+            identifier: "VIB-6".to_string(),
+            state_type: "completed".to_string(),
+            state_name: "Done".to_string(),
+        };
+        assert_eq!(
+            task.effective_status_with_pr(None, false, Some(&linear_done)),
+            TaskStatus::Done
+        );
+    }
+
+    #[test]
+    fn test_linear_terminal_overrides_worktree() {
+        let mut task = make_task(TaskStatus::Backlog);
+        task.linear_issue_id = Some("VIB-6".to_string());
+
+        // Linear says "completed" - should win over worktree presence
+        let linear_done = LinearIssueStatus {
+            identifier: "VIB-6".to_string(),
+            state_type: "completed".to_string(),
+            state_name: "Done".to_string(),
+        };
+        assert_eq!(
+            task.effective_status_with_pr(None, true, Some(&linear_done)),
+            TaskStatus::Done
+        );
+
+        // Linear says "canceled" - should win over worktree presence
+        let linear_cancelled = LinearIssueStatus {
+            identifier: "VIB-6".to_string(),
+            state_type: "canceled".to_string(),
+            state_name: "Cancelled".to_string(),
+        };
+        assert_eq!(
+            task.effective_status_with_pr(None, true, Some(&linear_cancelled)),
+            TaskStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn test_worktree_upgrades_backlog_to_inprogress() {
+        let mut task = make_task(TaskStatus::Backlog);
+        task.linear_issue_id = Some("VIB-6".to_string());
+
+        // Linear says "backlog" but worktree exists - worktree upgrades to in-progress
+        let linear_backlog = LinearIssueStatus {
+            identifier: "VIB-6".to_string(),
+            state_type: "backlog".to_string(),
+            state_name: "Backlog".to_string(),
+        };
+        assert_eq!(
+            task.effective_status_with_pr(None, true, Some(&linear_backlog)),
+            TaskStatus::Inprogress
+        );
+
+        // Linear says "unstarted" but worktree exists - worktree upgrades to in-progress
+        let linear_unstarted = LinearIssueStatus {
+            identifier: "VIB-6".to_string(),
+            state_type: "unstarted".to_string(),
+            state_name: "Todo".to_string(),
+        };
+        assert_eq!(
+            task.effective_status_with_pr(None, true, Some(&linear_unstarted)),
+            TaskStatus::Inprogress
+        );
     }
 }

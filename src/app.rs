@@ -4,10 +4,10 @@ use ratatui::layout::{Constraint, Direction, Layout};
 use tokio::sync::mpsc;
 
 use crate::external::{
-    BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader, LinearClient, LinearIssue, WorktreeInfo,
-    ZellijSession, attach_zellij_foreground, edit_markdown, get_pr_for_branch,
-    launch_zellij_claude_in_worktree, launch_zellij_claude_in_worktree_with_context,
-    list_sessions_with_status, list_worktrees,
+    BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader, LinearClient, LinearIssue,
+    LinearIssueStatus, WorktreeInfo, ZellijSession, attach_zellij_foreground, edit_markdown,
+    get_pr_for_branch, launch_zellij_claude_in_worktree,
+    launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
 use crate::state::{AppState, Modal, View, check_linear_api_key, linear_env_var_name};
@@ -23,6 +23,7 @@ type WorktreeResult = Result<Vec<WorktreeInfo>, String>;
 type SessionResult = Result<Vec<ZellijSession>, String>;
 type BranchPrResult = (String, Option<BranchPrInfo>);
 type LinearResult = Result<Vec<LinearIssue>, String>;
+type LinearStatusResult = Result<Vec<LinearIssueStatus>, String>;
 
 pub struct App {
     state: AppState,
@@ -44,6 +45,10 @@ pub struct App {
     // Linear sync channels
     linear_receiver: mpsc::Receiver<LinearResult>,
     linear_sender: mpsc::Sender<LinearResult>,
+    // Linear status sync channels (for issue status updates)
+    linear_status_receiver: mpsc::Receiver<LinearStatusResult>,
+    #[allow(dead_code)] // Sender kept to prevent channel closure
+    linear_status_sender: mpsc::Sender<LinearStatusResult>,
 }
 
 impl App {
@@ -71,6 +76,7 @@ impl App {
         let (session_sender, session_receiver) = mpsc::channel(4);
         let (pr_info_sender, pr_info_receiver) = mpsc::channel(32);
         let (linear_sender, linear_receiver) = mpsc::channel(4);
+        let (linear_status_sender, linear_status_receiver) = mpsc::channel(4);
 
         // Mark as loading immediately so UI shows loading state
         state.worktrees.loading = true;
@@ -94,6 +100,7 @@ impl App {
         if state.linear_api_key_available {
             let lin_sender = linear_sender.clone();
             let env_var = linear_env_var_name(&project_name);
+            let env_var_clone = env_var.clone();
             tracing::info!("Starting Linear fetch with env var: {}", env_var);
             tokio::spawn(async move {
                 match std::env::var(&env_var) {
@@ -116,6 +123,46 @@ impl App {
                     }
                 }
             });
+
+            // Fetch status for tasks that have linear_issue_id
+            let identifiers: Vec<String> = state
+                .tasks
+                .tasks
+                .iter()
+                .filter_map(|t| t.linear_issue_id.clone())
+                .collect();
+
+            if !identifiers.is_empty() {
+                let status_sender = linear_status_sender.clone();
+                tracing::info!("Fetching Linear statuses for {} tasks", identifiers.len());
+                tokio::spawn(async move {
+                    match std::env::var(&env_var_clone) {
+                        Ok(api_key) => {
+                            let client = LinearClient::new(api_key);
+                            match client.fetch_issue_statuses(&identifiers).await {
+                                Ok(statuses) => {
+                                    tracing::info!(
+                                        "Linear status fetch succeeded: {} statuses",
+                                        statuses.len()
+                                    );
+                                    let _ = status_sender.send(Ok(statuses)).await;
+                                }
+                                Err(e) => {
+                                    tracing::error!("Linear status fetch failed: {}", e);
+                                    let _ = status_sender.send(Err(e)).await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "Failed to read Linear API key {}: {}",
+                                env_var_clone,
+                                e
+                            );
+                        }
+                    }
+                });
+            }
         }
 
         Ok(Self {
@@ -136,6 +183,8 @@ impl App {
             pr_info_sender,
             linear_receiver,
             linear_sender,
+            linear_status_receiver,
+            linear_status_sender,
         })
     }
 
@@ -266,6 +315,26 @@ impl App {
                 }
             }
         }
+
+        // Non-blocking check for Linear status results
+        while let Ok(result) = self.linear_status_receiver.try_recv() {
+            match result {
+                Ok(statuses) => {
+                    for status in statuses {
+                        self.state
+                            .linear_issue_statuses
+                            .insert(status.identifier.clone(), status);
+                    }
+                    tracing::info!(
+                        "Linear status cache updated: {} entries",
+                        self.state.linear_issue_statuses.len()
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Linear status fetch error: {}", e);
+                }
+            }
+        }
     }
 
     fn fetch_pr_info_for_branches(&self, worktrees: &[WorktreeInfo]) {
@@ -313,6 +382,7 @@ impl App {
                         &self.state.sessions,
                         self.state.spinner_char(),
                         self.state.linear_pending_issues.len(),
+                        &self.state.linear_issue_statuses,
                     );
                 }
                 View::TaskDetail => {
@@ -626,9 +696,12 @@ impl App {
             View::Kanban => {
                 let branch_prs = self.state.worktrees.branch_prs.clone();
                 let worktrees = self.state.worktrees.worktrees.clone();
-                self.state
-                    .tasks
-                    .select_prev_card_with_prs(&branch_prs, &worktrees);
+                let linear_statuses = self.state.linear_issue_statuses.clone();
+                self.state.tasks.select_prev_card_with_prs(
+                    &branch_prs,
+                    &worktrees,
+                    &linear_statuses,
+                );
             }
             View::TaskDetail => {}
             View::Worktrees => {
@@ -658,9 +731,12 @@ impl App {
             View::Kanban => {
                 let branch_prs = self.state.worktrees.branch_prs.clone();
                 let worktrees = self.state.worktrees.worktrees.clone();
-                self.state
-                    .tasks
-                    .select_next_card_with_prs(&branch_prs, &worktrees);
+                let linear_statuses = self.state.linear_issue_statuses.clone();
+                self.state.tasks.select_next_card_with_prs(
+                    &branch_prs,
+                    &worktrees,
+                    &linear_statuses,
+                );
             }
             View::TaskDetail => {}
             View::Worktrees => {
@@ -695,6 +771,7 @@ impl App {
         self.state.tasks.selected_task_with_prs(
             &self.state.worktrees.branch_prs,
             &self.state.worktrees.worktrees,
+            &self.state.linear_issue_statuses,
         )
     }
 

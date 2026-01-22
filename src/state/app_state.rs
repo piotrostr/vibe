@@ -1,5 +1,7 @@
+use std::collections::HashMap;
+
 use super::{LogsState, ProjectsState, SearchState, SessionsState, TasksState, WorktreesState};
-use crate::external::LinearIssue;
+use crate::external::{LinearIssue, LinearIssueStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -51,6 +53,10 @@ pub struct AppState {
     /// Error message from Linear API (if any)
     pub linear_error: Option<String>,
 
+    /// Linear issue statuses keyed by identifier (e.g., "VIB-6")
+    /// Used to derive effective task status from Linear source of truth
+    pub linear_issue_statuses: HashMap<String, LinearIssueStatus>,
+
     /// When true, logs are shown as an overlay on top of the current view
     pub logs_overlay_visible: bool,
 
@@ -88,6 +94,7 @@ impl AppState {
 
             linear_pending_issues: Vec::new(),
             linear_error: None,
+            linear_issue_statuses: HashMap::new(),
 
             logs_overlay_visible: false,
 

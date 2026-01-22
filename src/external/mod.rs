@@ -15,7 +15,7 @@ pub use claude_activity::ClaudeActivityTracker;
 pub use claude_plans::ClaudePlanReader;
 pub use editor::edit_markdown;
 pub use gh::*;
-pub use linear::{LinearClient, LinearIssue};
+pub use linear::{LinearClient, LinearIssue, LinearIssueStatus};
 pub use terminal_spawn::*;
 pub use worktrunk::*;
 pub use zellij::*;

@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -6,9 +8,10 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState},
 };
 
-use crate::external::ClaudeActivityState;
+use crate::external::{ClaudeActivityState, LinearIssueStatus};
 use crate::state::{SessionsState, TaskStatus, TasksState, WorktreesState};
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_kanban_board(
     frame: &mut Frame,
     area: Rect,
@@ -17,6 +20,7 @@ pub fn render_kanban_board(
     sessions: &SessionsState,
     spinner_char: char,
     linear_pending_count: usize,
+    linear_statuses: &HashMap<String, LinearIssueStatus>,
 ) {
     // Split into 4 horizontal rows (Backlog, In Progress, In Review, Done)
     let rows = Layout::default()
@@ -46,6 +50,7 @@ pub fn render_kanban_board(
             is_selected,
             spinner_char,
             pending,
+            linear_statuses,
         );
     }
 }
@@ -61,9 +66,14 @@ fn render_row(
     is_selected: bool,
     spinner_char: char,
     linear_pending: usize,
+    linear_statuses: &HashMap<String, LinearIssueStatus>,
 ) {
-    let tasks =
-        tasks_state.tasks_in_column_with_prs(status, &worktrees.branch_prs, &worktrees.worktrees);
+    let tasks = tasks_state.tasks_in_column_with_prs(
+        status,
+        &worktrees.branch_prs,
+        &worktrees.worktrees,
+        linear_statuses,
+    );
     let count = tasks.len();
     let column_index = status.column_index();
 

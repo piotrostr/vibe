@@ -10,6 +10,14 @@ pub struct LinearIssue {
     pub labels: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LinearIssueStatus {
+    pub identifier: String,
+    pub state_type: String, // "backlog", "unstarted", "started", "completed", "cancelled"
+    #[allow(dead_code)] // Kept for debug output and future use
+    pub state_name: String, // Human-readable like "In Progress"
+}
+
 #[derive(Debug, Deserialize)]
 struct GraphQLResponse<T> {
     data: Option<T>,
@@ -149,6 +157,109 @@ impl LinearClient {
             })
             .collect())
     }
+
+    /// Fetch status for multiple issues by identifiers
+    /// Uses GraphQL aliases to batch multiple `issue` queries into one request
+    pub async fn fetch_issue_statuses(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<LinearIssueStatus>, String> {
+        if identifiers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Build a query with aliases for each identifier
+        // e.g., query { i0: issue(id: "VIB-5") { ... } i1: issue(id: "VIB-6") { ... } }
+        let fields: Vec<String> = identifiers
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                format!(
+                    r#"i{}: issue(id: "{}") {{ identifier state {{ name type }} }}"#,
+                    i, id
+                )
+            })
+            .collect();
+
+        let query = format!("query {{ {} }}", fields.join(" "));
+
+        let body = serde_json::json!({ "query": query });
+
+        let response = self
+            .http
+            .post(Self::API_URL)
+            .header("Authorization", &self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                text.chars().take(200).collect::<String>()
+            ));
+        }
+
+        // Parse as dynamic JSON since the response shape depends on aliases
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("JSON parse error: {}", e))?;
+
+        if let Some(errors) = json.get("errors")
+            && let Some(arr) = errors.as_array()
+        {
+            let msgs: Vec<String> = arr
+                .iter()
+                .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+                .map(|s| s.to_string())
+                .collect();
+            if !msgs.is_empty() {
+                return Err(format!("GraphQL error: {}", msgs.join(", ")));
+            }
+        }
+
+        let data = json.get("data").ok_or("No data in response")?;
+
+        let mut statuses = Vec::new();
+        for i in 0..identifiers.len() {
+            let key = format!("i{}", i);
+            if let Some(issue) = data.get(&key) {
+                // issue can be null if not found
+                if issue.is_null() {
+                    continue;
+                }
+                let identifier = issue
+                    .get("identifier")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let state = issue.get("state").ok_or("Missing state field")?;
+                let state_name = state
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let state_type = state
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+
+                statuses.push(LinearIssueStatus {
+                    identifier,
+                    state_type,
+                    state_name,
+                });
+            }
+        }
+
+        Ok(statuses)
+    }
 }
 
 #[cfg(test)]
@@ -180,5 +291,46 @@ mod tests {
                 panic!("Failed to fetch issues: {}", e);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_issue_statuses() {
+        let Some(api_key) = get_test_api_key() else {
+            eprintln!("Skipping test: VIBE_KANBAN_LINEAR_API_KEY not set");
+            return;
+        };
+
+        let client = LinearClient::new(api_key);
+        // Use a non-existent ID to test the empty case, and the real API response
+        let result = client.fetch_issue_statuses(&["VIB-999".to_string()]).await;
+
+        match result {
+            Ok(statuses) => {
+                println!("Fetched {} issue statuses", statuses.len());
+                for status in &statuses {
+                    println!(
+                        "  - {} [{}]: {}",
+                        status.identifier, status.state_type, status.state_name
+                    );
+                }
+            }
+            Err(e) => {
+                panic!("Failed to fetch issue statuses: {}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fetch_issue_statuses_empty() {
+        let Some(api_key) = get_test_api_key() else {
+            eprintln!("Skipping test: VIBE_KANBAN_LINEAR_API_KEY not set");
+            return;
+        };
+
+        let client = LinearClient::new(api_key);
+        let result = client.fetch_issue_statuses(&[]).await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
     }
 }

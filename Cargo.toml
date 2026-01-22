@@ -1,0 +1,50 @@
+[package]
+name = "vibe"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal-based kanban board for managing Claude Code sessions"
+license = "MIT"
+repository = "https://github.com/piotrostr/vibe"
+
+[[bin]]
+name = "vibe"
+path = "src/main.rs"
+
+[[bin]]
+name = "vibe-migrate"
+path = "src/bin/migrate.rs"
+
+[lints.clippy]
+uninlined-format-args = "allow"
+
+[dependencies]
+# TUI framework
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
+# Async runtime
+tokio = { version = "1.0", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_yaml = "0.9"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0.12"
+
+# Logging
+tracing = "0.1.43"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+
+# Utilities
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+tempfile = "3"
+open = "5"
+glob = "0.3"
+rusqlite = "0.32"
+md5 = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

@@ -1,0 +1,1220 @@
+use anyhow::Result;
+use crossterm::event::Event;
+use ratatui::layout::{Constraint, Direction, Layout};
+use tokio::sync::mpsc;
+
+use crate::external::{
+    BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader, LinearClient, LinearIssue, WorktreeInfo,
+    ZellijSession, attach_zellij_foreground, edit_markdown, get_pr_for_branch,
+    launch_zellij_claude_in_worktree, launch_zellij_claude_in_worktree_with_context,
+    list_sessions_with_status, list_worktrees,
+};
+use crate::input::{Action, EventStream, extract_key_event, key_to_action};
+use crate::state::{AppState, Modal, View, check_linear_api_key, linear_env_var_name};
+use crate::storage::TaskStorage;
+use crate::terminal::Terminal;
+use crate::ui::{
+    render_footer, render_header, render_help_modal, render_kanban_board, render_logs,
+    render_logs_overlay, render_search, render_sessions, render_task_detail_with_actions,
+    render_worktrees,
+};
+
+type WorktreeResult = Result<Vec<WorktreeInfo>, String>;
+type SessionResult = Result<Vec<ZellijSession>, String>;
+type BranchPrResult = (String, Option<BranchPrInfo>);
+type LinearResult = Result<Vec<LinearIssue>, String>;
+
+pub struct App {
+    state: AppState,
+    storage: TaskStorage,
+    events: EventStream,
+    last_session_poll: std::time::Instant,
+    last_animation_tick: std::time::Instant,
+    last_pr_poll: std::time::Instant,
+    last_activity_poll: std::time::Instant,
+    claude_activity_tracker: ClaudeActivityTracker,
+    plan_reader: ClaudePlanReader,
+    // Background loading channels
+    worktree_receiver: mpsc::Receiver<WorktreeResult>,
+    worktree_sender: mpsc::Sender<WorktreeResult>,
+    session_receiver: mpsc::Receiver<SessionResult>,
+    session_sender: mpsc::Sender<SessionResult>,
+    pr_info_receiver: mpsc::Receiver<BranchPrResult>,
+    pr_info_sender: mpsc::Sender<BranchPrResult>,
+    // Linear sync channels
+    linear_receiver: mpsc::Receiver<LinearResult>,
+    linear_sender: mpsc::Sender<LinearResult>,
+}
+
+impl App {
+    pub fn new() -> Result<Self> {
+        // Create storage from current directory
+        let storage = TaskStorage::from_cwd()?;
+        let project_name = storage.project_name().to_string();
+
+        let mut state = AppState::new();
+
+        // Check if Linear API key env var is available
+        state.linear_api_key_available = check_linear_api_key(&project_name);
+
+        // Load tasks from files
+        let tasks = storage.list_tasks()?;
+        state.tasks.set_tasks(tasks);
+
+        // No project selection - we're already in the project
+        state.selected_project_id = Some(project_name.clone());
+        state.view = View::Kanban;
+        state.backend_connected = true; // File-based, always "connected"
+
+        // Create background loading channels
+        let (worktree_sender, worktree_receiver) = mpsc::channel(4);
+        let (session_sender, session_receiver) = mpsc::channel(4);
+        let (pr_info_sender, pr_info_receiver) = mpsc::channel(32);
+        let (linear_sender, linear_receiver) = mpsc::channel(4);
+
+        // Mark as loading immediately so UI shows loading state
+        state.worktrees.loading = true;
+        state.sessions.loading = true;
+
+        // Spawn immediate background load for worktrees
+        let wt_sender = worktree_sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = list_worktrees().map_err(|e| e.to_string());
+            let _ = wt_sender.blocking_send(result);
+        });
+
+        // Spawn immediate background load for sessions
+        let sess_sender = session_sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = list_sessions_with_status().map_err(|e| e.to_string());
+            let _ = sess_sender.blocking_send(result);
+        });
+
+        // Spawn initial Linear fetch if API key is available
+        if state.linear_api_key_available {
+            let lin_sender = linear_sender.clone();
+            let env_var = linear_env_var_name(&project_name);
+            tracing::info!("Starting Linear fetch with env var: {}", env_var);
+            tokio::spawn(async move {
+                match std::env::var(&env_var) {
+                    Ok(api_key) => {
+                        tracing::info!("Linear API key found, fetching backlog issues...");
+                        let client = LinearClient::new(api_key);
+                        match client.fetch_backlog_issues().await {
+                            Ok(issues) => {
+                                tracing::info!("Linear fetch succeeded: {} issues", issues.len());
+                                let _ = lin_sender.send(Ok(issues)).await;
+                            }
+                            Err(e) => {
+                                tracing::error!("Linear fetch failed: {}", e);
+                                let _ = lin_sender.send(Err(e)).await;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to read Linear API key {}: {}", env_var, e);
+                    }
+                }
+            });
+        }
+
+        Ok(Self {
+            state,
+            storage,
+            events: EventStream::new(),
+            last_session_poll: std::time::Instant::now(),
+            last_animation_tick: std::time::Instant::now(),
+            last_pr_poll: std::time::Instant::now(),
+            last_activity_poll: std::time::Instant::now(),
+            claude_activity_tracker: ClaudeActivityTracker::new(),
+            plan_reader: ClaudePlanReader::new(),
+            worktree_receiver,
+            worktree_sender,
+            session_receiver,
+            session_sender,
+            pr_info_receiver,
+            pr_info_sender,
+            linear_receiver,
+            linear_sender,
+        })
+    }
+
+    pub async fn run(&mut self, terminal: &mut Terminal) -> Result<()> {
+        // Poll session status every 5 seconds
+        const SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+        // Poll PR status every 30 seconds
+        const PR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+        // Tick animation every 250ms for smooth spinner
+        const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+        // Poll Claude activity every 500ms for responsive status updates
+        const ACTIVITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+        loop {
+            // Check for background load results (worktrees, sessions, PRs)
+            self.check_background_loads();
+
+            // Poll session status periodically (non-blocking background refresh)
+            if self.last_session_poll.elapsed() >= SESSION_POLL_INTERVAL {
+                self.poll_sessions_async();
+                self.last_session_poll = std::time::Instant::now();
+            }
+
+            // Poll PR status periodically
+            if self.last_pr_poll.elapsed() >= PR_POLL_INTERVAL {
+                self.poll_pr_info_async();
+                self.last_pr_poll = std::time::Instant::now();
+            }
+
+            // Poll Claude activity status more frequently for responsive indicators
+            if self.last_activity_poll.elapsed() >= ACTIVITY_POLL_INTERVAL {
+                self.poll_claude_activity();
+                self.last_activity_poll = std::time::Instant::now();
+            }
+
+            // Tick animation for spinners
+            if self.last_animation_tick.elapsed() >= ANIMATION_TICK_INTERVAL {
+                self.state.tick_animation();
+                self.last_animation_tick = std::time::Instant::now();
+            }
+
+            // Render
+            self.render(terminal)?;
+
+            // Handle events
+            if let Some(event) = self.events.next().await? {
+                self.handle_event(event, terminal).await?;
+            }
+
+            if self.state.should_quit {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn check_background_loads(&mut self) {
+        // Non-blocking check for worktree results
+        while let Ok(result) = self.worktree_receiver.try_recv() {
+            match result {
+                Ok(worktrees) => {
+                    // Spawn PR info fetch for each branch
+                    self.fetch_pr_info_for_branches(&worktrees);
+                    self.state.worktrees.set_worktrees(worktrees);
+                    self.state.worktrees.loading = false;
+                    self.state.worktrees.error = None;
+                }
+                Err(e) => {
+                    self.state.worktrees.error = Some(e);
+                    self.state.worktrees.loading = false;
+                }
+            }
+        }
+
+        // Non-blocking check for session results
+        while let Ok(result) = self.session_receiver.try_recv() {
+            match result {
+                Ok(sessions) => {
+                    self.state.sessions.set_sessions(sessions);
+                    self.state.sessions.loading = false;
+                    self.state.sessions.error = None;
+                }
+                Err(e) => {
+                    self.state.sessions.error = Some(e);
+                    self.state.sessions.loading = false;
+                }
+            }
+        }
+
+        // Non-blocking check for PR info results
+        while let Ok((branch, pr_info)) = self.pr_info_receiver.try_recv() {
+            if let Some(info) = pr_info {
+                self.state.worktrees.set_branch_pr(branch, info);
+            } else {
+                self.state.worktrees.clear_branch_pr(&branch);
+            }
+        }
+
+        // Non-blocking check for Linear results
+        while let Ok(result) = self.linear_receiver.try_recv() {
+            match result {
+                Ok(issues) => {
+                    // Filter to issues not already imported locally
+                    let local_linear_ids: std::collections::HashSet<_> = self
+                        .state
+                        .tasks
+                        .tasks
+                        .iter()
+                        .filter_map(|t| t.linear_issue_id.as_ref())
+                        .collect();
+
+                    let pending: Vec<_> = issues
+                        .into_iter()
+                        .filter(|i| !local_linear_ids.contains(&i.identifier))
+                        .collect();
+
+                    tracing::info!(
+                        "Linear: {} pending issues not imported locally",
+                        pending.len()
+                    );
+                    self.state.linear_pending_issues = pending;
+                    self.state.linear_error = None;
+                }
+                Err(e) => {
+                    tracing::error!("Linear fetch error: {}", e);
+                    self.state.linear_error = Some(e);
+                }
+            }
+        }
+    }
+
+    fn fetch_pr_info_for_branches(&self, worktrees: &[WorktreeInfo]) {
+        for wt in worktrees {
+            // Skip main/master branches - they don't have PRs
+            if wt.branch == "main" || wt.branch == "master" {
+                continue;
+            }
+
+            let branch = wt.branch.clone();
+            let sender = self.pr_info_sender.clone();
+
+            tokio::task::spawn_blocking(move || {
+                let result = get_pr_for_branch(&branch);
+                let pr_info = result.ok().flatten();
+                let _ = sender.blocking_send((branch, pr_info));
+            });
+        }
+    }
+
+    fn render(&mut self, terminal: &mut Terminal) -> Result<()> {
+        terminal.draw(|frame| {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(6), // Header with ASCII logo
+                    Constraint::Min(0),    // Main content
+                    Constraint::Length(2), // Footer
+                ])
+                .split(frame.area());
+
+            render_header(frame, chunks[0], &self.state);
+
+            match self.state.view {
+                View::Projects => {
+                    // In standalone mode, skip project view - go back to kanban
+                    self.state.view = View::Kanban;
+                }
+                View::Kanban => {
+                    render_kanban_board(
+                        frame,
+                        chunks[1],
+                        &self.state.tasks,
+                        &self.state.worktrees,
+                        &self.state.sessions,
+                        self.state.spinner_char(),
+                        self.state.linear_pending_issues.len(),
+                    );
+                }
+                View::TaskDetail => {
+                    // Find the selected task
+                    if let Some(task_id) = &self.state.selected_task_id
+                        && let Some(task) = self.state.tasks.tasks.iter().find(|t| &t.id == task_id)
+                    {
+                        render_task_detail_with_actions(
+                            frame,
+                            chunks[1],
+                            task,
+                            self.state.selected_task_plan.as_deref(),
+                        );
+                    }
+                }
+                View::Worktrees => {
+                    render_worktrees(frame, chunks[1], &self.state.worktrees);
+                }
+                View::Sessions => {
+                    render_sessions(
+                        frame,
+                        chunks[1],
+                        &self.state.sessions,
+                        self.state.spinner_char(),
+                    );
+                }
+                View::Logs => {
+                    render_logs(frame, chunks[1], &self.state.logs);
+                }
+                View::Search => {
+                    render_search(frame, chunks[1], &self.state.search);
+                }
+            }
+
+            render_footer(frame, chunks[2], &self.state);
+
+            // Render logs overlay if visible (on top of everything except help modal)
+            if self.state.logs_overlay_visible {
+                render_logs_overlay(frame, frame.area(), &self.state.logs);
+            }
+
+            // Render modal if present
+            if let Some(Modal::Help) = &self.state.modal {
+                render_help_modal(frame, frame.area());
+            }
+        })?;
+
+        Ok(())
+    }
+
+    async fn handle_event(&mut self, event: Event, terminal: &mut Terminal) -> Result<()> {
+        let Some(key) = extract_key_event(event) else {
+            return Ok(());
+        };
+
+        let in_modal = self.state.modal.is_some();
+        let command_active = self.state.command_input.is_some();
+        let Some(action) = key_to_action(
+            key,
+            self.state.view,
+            in_modal,
+            self.state.search_active,
+            self.state.logs_overlay_visible,
+            command_active,
+        ) else {
+            return Ok(());
+        };
+
+        // Handle modal-specific actions
+        if in_modal {
+            if let Action::Back = action {
+                self.state.modal = None;
+            }
+            return Ok(());
+        }
+
+        // Handle regular actions
+        match action {
+            Action::Quit => {
+                self.state.should_quit = true;
+            }
+            Action::Back => {
+                self.handle_back();
+            }
+            Action::ShowHelp => {
+                self.state.modal = Some(Modal::Help);
+            }
+            Action::Up => {
+                self.handle_up();
+            }
+            Action::Down => {
+                self.handle_down();
+            }
+            Action::NextRow => {
+                self.handle_next_row();
+            }
+            Action::PrevRow => {
+                self.handle_prev_row();
+            }
+            Action::OpenTask => {
+                self.handle_open_task();
+            }
+            Action::Select => {
+                self.handle_select(terminal).await?;
+            }
+            Action::Refresh => {
+                // If logs overlay is visible, refresh logs
+                if self.state.logs_overlay_visible {
+                    self.state.logs.refresh();
+                } else {
+                    self.refresh()?;
+                }
+            }
+            Action::EditTask => {
+                self.handle_edit_task(terminal)?;
+            }
+            Action::CreateTask => {
+                self.handle_create_task(terminal)?;
+            }
+            Action::DeleteTask => {
+                self.handle_delete_task()?;
+            }
+            Action::ShowWorktrees => {
+                self.handle_show_worktrees()?;
+            }
+            Action::CreateWorktree => {
+                // TODO: Implement worktree creation modal
+            }
+            Action::SwitchWorktree => {
+                // TODO: Implement worktree switching
+            }
+            Action::ShowSessions => {
+                self.handle_show_sessions()?;
+            }
+            Action::LaunchSession => {
+                self.handle_launch_session(terminal, false)?;
+            }
+            Action::LaunchSessionPlan => {
+                self.handle_launch_session(terminal, true)?;
+            }
+            Action::ViewPR => {
+                self.handle_view_pr()?;
+            }
+            Action::BindPR => {
+                // PR binding not available in standalone mode
+                tracing::info!("PR binding requires server mode");
+            }
+            Action::AttachSession => {
+                self.handle_attach_session(terminal)?;
+            }
+            Action::KillSession => {
+                self.handle_kill_session()?;
+            }
+
+            // Search actions
+            Action::StartSearch => {
+                // Populate search with current tasks and switch to search view
+                self.state.search.set_tasks(self.state.tasks.tasks.clone());
+                self.state.view = View::Search;
+                self.state.search_active = true;
+            }
+            Action::SearchType(c) => {
+                if self.state.view == View::Search {
+                    self.state.search.type_char(c);
+                } else {
+                    self.state.search_query.push(c);
+                }
+            }
+            Action::SearchBackspace => {
+                if self.state.view == View::Search {
+                    self.state.search.backspace();
+                } else {
+                    self.state.search_query.pop();
+                }
+            }
+            Action::SearchDeleteWord => {
+                if self.state.view == View::Search {
+                    self.state.search.delete_word();
+                }
+            }
+            Action::ClearSearch => {
+                if self.state.view == View::Search {
+                    self.state.search.clear_query();
+                } else {
+                    self.state.search_query.clear();
+                    self.state.tasks.search_filter.clear();
+                }
+            }
+
+            Action::SyncLinear => {
+                self.handle_sync_linear()?;
+            }
+
+            Action::ShowLogs => {
+                self.handle_show_logs();
+            }
+
+            // Command mode actions (vim-like ;f)
+            Action::StartCommand => {
+                self.state.command_input = Some(String::new());
+            }
+            Action::CommandType(c) => {
+                if let Some(ref mut cmd) = self.state.command_input {
+                    cmd.push(c);
+                }
+            }
+            Action::CommandBackspace => {
+                if let Some(ref mut cmd) = self.state.command_input {
+                    cmd.pop();
+                }
+            }
+            Action::CancelCommand => {
+                self.state.command_input = None;
+            }
+            Action::ExecuteCommand => {
+                self.execute_command();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_show_logs(&mut self) {
+        // Toggle logs overlay
+        self.state.logs_overlay_visible = !self.state.logs_overlay_visible;
+        if self.state.logs_overlay_visible {
+            self.state.logs.load_logs();
+        }
+    }
+
+    fn handle_sync_linear(&mut self) -> Result<()> {
+        if self.state.linear_pending_issues.is_empty() {
+            tracing::info!("No pending Linear issues to import");
+            return Ok(());
+        }
+
+        // Import all pending issues
+        let pending = std::mem::take(&mut self.state.linear_pending_issues);
+        let mut imported = 0;
+        let mut errors = 0;
+
+        for issue in &pending {
+            match self.storage.create_task_from_linear(issue) {
+                Ok(_) => {
+                    tracing::info!("Imported Linear issue: {}", issue.title);
+                    imported += 1;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to import Linear issue {}: {}", issue.title, e);
+                    errors += 1;
+                }
+            }
+        }
+
+        tracing::info!("Linear sync: imported {}, errors {}", imported, errors);
+
+        // Refresh tasks to show newly imported ones
+        let tasks = self.storage.list_tasks()?;
+        self.state.tasks.set_tasks(tasks);
+
+        Ok(())
+    }
+
+    fn execute_command(&mut self) {
+        let cmd = self.state.command_input.take().unwrap_or_default();
+        match cmd.as_str() {
+            "f" | "find" => {
+                // Start search mode
+                self.state.search.set_tasks(self.state.tasks.tasks.clone());
+                self.state.view = View::Search;
+                self.state.search_active = true;
+            }
+            _ => {
+                // Unknown command - just clear
+                tracing::debug!("Unknown command: {}", cmd);
+            }
+        }
+    }
+
+    fn handle_back(&mut self) {
+        match self.state.view {
+            View::Projects | View::Kanban => {
+                // In standalone mode, quit from kanban
+                self.state.should_quit = true;
+            }
+            View::TaskDetail => {
+                self.state.selected_task_id = None;
+                self.state.selected_task_plan = None;
+                self.state.view = View::Kanban;
+            }
+            View::Worktrees | View::Sessions | View::Logs => {
+                self.state.view = View::Kanban;
+            }
+            View::Search => {
+                self.state.search.clear();
+                self.state.search_active = false;
+                self.state.view = View::Kanban;
+            }
+        }
+    }
+
+    fn handle_up(&mut self) {
+        // If logs overlay is visible, scroll logs
+        if self.state.logs_overlay_visible {
+            self.state.logs.scroll_up();
+            return;
+        }
+
+        match self.state.view {
+            View::Projects => {}
+            View::Kanban => {
+                let branch_prs = self.state.worktrees.branch_prs.clone();
+                let worktrees = self.state.worktrees.worktrees.clone();
+                self.state
+                    .tasks
+                    .select_prev_card_with_prs(&branch_prs, &worktrees);
+            }
+            View::TaskDetail => {}
+            View::Worktrees => {
+                self.state.worktrees.select_prev();
+            }
+            View::Sessions => {
+                self.state.sessions.select_prev();
+            }
+            View::Logs => {
+                self.state.logs.scroll_up();
+            }
+            View::Search => {
+                self.state.search.select_prev();
+            }
+        }
+    }
+
+    fn handle_down(&mut self) {
+        // If logs overlay is visible, scroll logs
+        if self.state.logs_overlay_visible {
+            self.state.logs.scroll_down();
+            return;
+        }
+
+        match self.state.view {
+            View::Projects => {}
+            View::Kanban => {
+                let branch_prs = self.state.worktrees.branch_prs.clone();
+                let worktrees = self.state.worktrees.worktrees.clone();
+                self.state
+                    .tasks
+                    .select_next_card_with_prs(&branch_prs, &worktrees);
+            }
+            View::TaskDetail => {}
+            View::Worktrees => {
+                self.state.worktrees.select_next();
+            }
+            View::Sessions => {
+                self.state.sessions.select_next();
+            }
+            View::Logs => {
+                self.state.logs.scroll_down();
+            }
+            View::Search => {
+                self.state.search.select_next();
+            }
+        }
+    }
+
+    fn handle_next_row(&mut self) {
+        if self.state.view == View::Kanban {
+            self.state.tasks.select_next_column();
+        }
+    }
+
+    fn handle_prev_row(&mut self) {
+        if self.state.view == View::Kanban {
+            self.state.tasks.select_prev_column();
+        }
+    }
+
+    /// Get the currently selected task, considering PR status for column placement
+    fn selected_task(&self) -> Option<&crate::state::Task> {
+        self.state.tasks.selected_task_with_prs(
+            &self.state.worktrees.branch_prs,
+            &self.state.worktrees.worktrees,
+        )
+    }
+
+    fn handle_open_task(&mut self) {
+        if self.state.view == View::Kanban
+            && let Some(task) = self.selected_task().cloned()
+        {
+            self.state.selected_task_id = Some(task.id.clone());
+            self.load_plan_for_task(&task);
+            self.state.view = View::TaskDetail;
+        }
+    }
+
+    /// Load the Claude Code plan for a task based on its branch.
+    fn load_plan_for_task(&mut self, task: &crate::state::Task) {
+        let branch = task_title_to_branch(&task.title, task.linear_issue_id.as_deref());
+        if let Some(project_dir) = self.get_project_dir() {
+            let project_path = project_dir.to_string_lossy().to_string();
+            self.state.selected_task_plan = self
+                .plan_reader
+                .find_plan_for_branch(&project_path, &branch);
+        } else {
+            self.state.selected_task_plan = None;
+        }
+    }
+
+    async fn handle_select(&mut self, terminal: &mut Terminal) -> Result<()> {
+        match self.state.view {
+            View::Projects => {
+                // In standalone mode, no project selection needed
+            }
+            View::Kanban => {
+                if let Some(task) = self.selected_task().cloned() {
+                    self.state.selected_task_id = Some(task.id.clone());
+                    self.load_plan_for_task(&task);
+                    self.state.view = View::TaskDetail;
+                }
+            }
+            View::TaskDetail => {
+                // Launch session for task
+                self.handle_launch_session(terminal, false)?;
+            }
+            View::Worktrees => {
+                // Launch session in selected worktree
+                self.handle_launch_session(terminal, false)?;
+            }
+            View::Sessions => {
+                // Attach to selected session
+                self.handle_attach_session(terminal)?;
+            }
+            View::Logs => {
+                // Refresh logs on select
+                self.state.logs.refresh();
+            }
+            View::Search => {
+                // Select task from search results and go to detail view
+                if let Some(task) = self.state.search.selected_task().cloned() {
+                    self.state.selected_task_id = Some(task.id.clone());
+                    self.load_plan_for_task(&task);
+                    self.state.search.clear();
+                    self.state.search_active = false;
+                    self.state.view = View::TaskDetail;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn refresh(&mut self) -> Result<()> {
+        match self.state.view {
+            View::Projects => {}
+            View::Kanban | View::TaskDetail => {
+                let tasks = self.storage.list_tasks()?;
+                self.state.tasks.set_tasks(tasks);
+                // Also refresh Linear pending issues
+                self.refresh_linear();
+            }
+            View::Worktrees => {
+                self.load_worktrees();
+            }
+            View::Sessions => {
+                self.load_sessions();
+            }
+            View::Logs => {
+                self.state.logs.refresh();
+            }
+            View::Search => {
+                let tasks = self.storage.list_tasks()?;
+                self.state.tasks.set_tasks(tasks.clone());
+                self.state.search.set_tasks(tasks);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn refresh_linear(&self) {
+        if !self.state.linear_api_key_available {
+            return;
+        }
+
+        let project_name = self.storage.project_name().to_string();
+        let env_var = linear_env_var_name(&project_name);
+        let sender = self.linear_sender.clone();
+
+        tokio::spawn(async move {
+            if let Ok(api_key) = std::env::var(&env_var) {
+                let client = LinearClient::new(api_key);
+                let result = client.fetch_backlog_issues().await;
+                let _ = sender.send(result).await;
+            }
+        });
+    }
+
+    fn handle_edit_task(&mut self, terminal: &mut Terminal) -> Result<()> {
+        // Get the selected task
+        let task_id = match self.state.view {
+            View::TaskDetail => self.state.selected_task_id.clone(),
+            View::Kanban => self.selected_task().map(|t| t.id.clone()),
+            _ => None,
+        };
+
+        let Some(task_id) = task_id else {
+            return Ok(());
+        };
+
+        // Find the task
+        let task = self
+            .state
+            .tasks
+            .tasks
+            .iter()
+            .find(|t| t.id == task_id)
+            .cloned();
+
+        let Some(task) = task else {
+            return Ok(());
+        };
+
+        // Suspend terminal for editor
+        terminal.suspend()?;
+
+        // Edit in external editor
+        let content = format!(
+            "# {}\n\n{}",
+            task.title,
+            task.description.as_deref().unwrap_or("")
+        );
+
+        let edited = edit_markdown(&content);
+
+        // Resume terminal
+        terminal.resume()?;
+
+        // Process the edit
+        if let Ok(Some(new_content)) = edited {
+            // Parse the edited content - first line is title, rest is description
+            let mut lines = new_content.lines();
+            let title_line = lines.next().unwrap_or(&task.title);
+            let title = title_line.trim_start_matches('#').trim().to_string();
+            let description: String = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+
+            let description = if description.is_empty() {
+                task.description.clone()
+            } else {
+                Some(description)
+            };
+
+            self.storage
+                .update_task(&task_id, &title, description.as_deref())?;
+
+            // Refresh to get updated data
+            self.refresh()?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_create_task(&mut self, terminal: &mut Terminal) -> Result<()> {
+        // Suspend terminal for editor
+        terminal.suspend()?;
+
+        // Edit new task in editor
+        let content = "# New Task\n\nDescription here...";
+        let edited = edit_markdown(content);
+
+        // Resume terminal
+        terminal.resume()?;
+
+        // Process the edit
+        if let Ok(Some(new_content)) = edited {
+            // Parse the edited content
+            let mut lines = new_content.lines();
+            let title_line = lines.next().unwrap_or("New Task");
+            let title = title_line.trim_start_matches('#').trim().to_string();
+            let description: String = lines.collect::<Vec<_>>().join("\n").trim().to_string();
+
+            if title.is_empty() || title == "New Task" {
+                return Ok(()); // Cancelled
+            }
+
+            let description = if description.is_empty() || description == "Description here..." {
+                None
+            } else {
+                Some(description)
+            };
+
+            self.storage.create_task(&title, description.as_deref())?;
+
+            // Refresh to get updated data
+            self.refresh()?;
+        }
+
+        Ok(())
+    }
+
+    fn handle_delete_task(&mut self) -> Result<()> {
+        // Get the selected task
+        let task_id = match self.state.view {
+            View::TaskDetail => self.state.selected_task_id.clone(),
+            View::Kanban => self.selected_task().map(|t| t.id.clone()),
+            _ => None,
+        };
+
+        let Some(task_id) = task_id else {
+            return Ok(());
+        };
+
+        // Delete the task
+        self.storage.delete_task(&task_id)?;
+
+        // Go back if we were in task detail view
+        if self.state.view == View::TaskDetail {
+            self.state.selected_task_id = None;
+            self.state.view = View::Kanban;
+        }
+
+        // Refresh to get updated data
+        self.refresh()?;
+
+        Ok(())
+    }
+
+    // Worktree and session handlers
+
+    fn handle_show_worktrees(&mut self) -> Result<()> {
+        self.load_worktrees();
+        self.state.view = View::Worktrees;
+        Ok(())
+    }
+
+    fn load_worktrees(&mut self) {
+        // Skip if already loading
+        if self.state.worktrees.loading {
+            return;
+        }
+
+        self.state.worktrees.loading = true;
+        self.state.worktrees.error = None;
+
+        // Spawn background task
+        let sender = self.worktree_sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = list_worktrees().map_err(|e| e.to_string());
+            let _ = sender.blocking_send(result);
+        });
+    }
+
+    fn handle_show_sessions(&mut self) -> Result<()> {
+        self.load_sessions();
+        self.state.view = View::Sessions;
+        Ok(())
+    }
+
+    fn load_sessions(&mut self) {
+        // Skip if already loading
+        if self.state.sessions.loading {
+            return;
+        }
+
+        self.state.sessions.loading = true;
+        self.state.sessions.error = None;
+
+        // Spawn background task
+        let sender = self.session_sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = list_sessions_with_status().map_err(|e| e.to_string());
+            let _ = sender.blocking_send(result);
+        });
+    }
+
+    fn poll_sessions_async(&mut self) {
+        // Spawn background task to refresh session status
+        // Only if not already loading (avoid stacking requests)
+        if !self.state.sessions.loading {
+            let sender = self.session_sender.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = list_sessions_with_status().map_err(|e| e.to_string());
+                let _ = sender.blocking_send(result);
+            });
+        }
+    }
+
+    fn poll_pr_info_async(&mut self) {
+        // Re-fetch PR info for all known worktree branches
+        let worktrees = self.state.worktrees.worktrees.clone();
+        self.fetch_pr_info_for_branches(&worktrees);
+    }
+
+    fn poll_claude_activity(&mut self) {
+        // Update Claude activity state for all sessions
+        self.claude_activity_tracker
+            .update_sessions(&mut self.state.sessions.sessions);
+    }
+
+    /// Get the project directory (current working directory)
+    fn get_project_dir(&self) -> Option<std::path::PathBuf> {
+        std::env::current_dir().ok()
+    }
+
+    fn handle_launch_session(&mut self, terminal: &mut Terminal, plan_mode: bool) -> Result<()> {
+        // Get project directory - required for wt to work
+        let project_dir = match self.get_project_dir() {
+            Some(dir) => {
+                if !dir.exists() {
+                    tracing::error!("Project directory does not exist: {:?}", dir);
+                    return Ok(());
+                }
+                dir
+            }
+            None => {
+                tracing::error!("Failed to get current directory");
+                return Ok(());
+            }
+        };
+
+        // Get task and derive branch name
+        let task = match self.state.view {
+            View::Worktrees => {
+                // If in worktrees view, use selected worktree directly
+                if let Some(wt) = self.state.worktrees.selected() {
+                    terminal.suspend()?;
+                    let result =
+                        launch_zellij_claude_in_worktree(&wt.branch, plan_mode, &project_dir);
+                    terminal.resume()?;
+                    if let Err(e) = result {
+                        tracing::error!("Failed to launch session: {}", e);
+                    }
+                    return Ok(());
+                }
+                return Ok(());
+            }
+            View::TaskDetail => {
+                // Use selected_task_id for detail view (set from search or kanban)
+                self.state
+                    .selected_task_id
+                    .as_ref()
+                    .and_then(|id| self.state.tasks.tasks.iter().find(|t| &t.id == id))
+            }
+            View::Kanban => self.selected_task(),
+            _ => None,
+        };
+
+        let Some(task) = task else {
+            tracing::warn!("No task selected for session launch");
+            return Ok(());
+        };
+
+        // Create branch slug from task title (with Linear ID prefix if available)
+        let branch = task_title_to_branch(&task.title, task.linear_issue_id.as_deref());
+
+        // Build task context for fresh sessions
+        let task_context = {
+            let mut context = format!("Task: {}", task.title);
+            if let Some(desc) = &task.description
+                && !desc.is_empty()
+            {
+                context.push_str(&format!("\n\nDescription:\n{}", desc));
+            }
+            context
+        };
+
+        // Suspend TUI, create worktree if needed, launch claude
+        terminal.suspend()?;
+
+        let result = launch_zellij_claude_in_worktree_with_context(
+            &branch,
+            &task_context,
+            plan_mode,
+            &project_dir,
+        );
+
+        terminal.resume()?;
+
+        if let Err(e) = result {
+            tracing::error!("Failed to launch session: {}", e);
+        }
+
+        // After returning from session, go back to kanban board
+        if self.state.view == View::TaskDetail {
+            self.state.selected_task_id = None;
+            self.state.selected_task_plan = None;
+            self.state.view = View::Kanban;
+        }
+
+        Ok(())
+    }
+
+    fn handle_view_pr(&self) -> Result<()> {
+        if let Some(task) = self.selected_task() {
+            // Check task's PR URL first
+            if let Some(pr_url) = &task.pr_url {
+                if let Err(e) = open::that(pr_url) {
+                    tracing::error!("Failed to open PR URL: {}", e);
+                }
+                return Ok(());
+            }
+
+            // Check locally detected PR info
+            let branch = task_title_to_branch(&task.title, task.linear_issue_id.as_deref());
+            if let Some(pr_info) = self.state.worktrees.branch_prs.get(&branch) {
+                if let Err(e) = open::that(&pr_info.url) {
+                    tracing::error!("Failed to open PR URL: {}", e);
+                }
+            } else {
+                tracing::warn!("No PR URL for this task");
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_attach_session(&mut self, terminal: &mut Terminal) -> Result<()> {
+        let Some(session) = self.state.sessions.selected() else {
+            tracing::warn!("No session selected");
+            return Ok(());
+        };
+
+        let session_name = session.name.clone();
+
+        // Suspend TUI, attach to zellij, then resume TUI
+        terminal.suspend()?;
+
+        let result = attach_zellij_foreground(&session_name);
+
+        terminal.resume()?;
+
+        if let Err(e) = result {
+            tracing::error!("Failed to attach session: {}", e);
+        } else {
+            tracing::info!("Returned from session {}", session_name);
+        }
+
+        Ok(())
+    }
+
+    fn handle_kill_session(&mut self) -> Result<()> {
+        let Some(session) = self.state.sessions.selected() else {
+            tracing::warn!("No session selected");
+            return Ok(());
+        };
+
+        if let Err(e) = crate::external::kill_session(&session.name) {
+            tracing::error!("Failed to kill session: {}", e);
+        } else {
+            tracing::info!("Killed session {}", session.name);
+            // Refresh the sessions list
+            self.load_sessions();
+        }
+
+        Ok(())
+    }
+}
+
+/// Convert task title to a branch name slug.
+/// If linear_id is provided, prefixes the branch name with it (e.g., "AMB-67/add-feature").
+fn task_title_to_branch(title: &str, linear_id: Option<&str>) -> String {
+    let slug = title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+
+    match linear_id {
+        Some(id) => format!("{}/{}", id, slug),
+        None => slug,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_task_title_to_branch_without_linear_id() {
+        assert_eq!(task_title_to_branch("Hello World", None), "hello-world");
+        assert_eq!(
+            task_title_to_branch("Add feature: user auth", None),
+            "add-feature-user-auth"
+        );
+        assert_eq!(task_title_to_branch("Fix bug #123", None), "fix-bug-123");
+        assert_eq!(
+            task_title_to_branch("  Multiple   Spaces  ", None),
+            "multiple-spaces"
+        );
+    }
+
+    #[test]
+    fn test_task_title_to_branch_with_linear_id() {
+        assert_eq!(
+            task_title_to_branch("Add some feature", Some("AMB-67")),
+            "AMB-67/add-some-feature"
+        );
+        assert_eq!(
+            task_title_to_branch("Fix the bug", Some("TEAM-123")),
+            "TEAM-123/fix-the-bug"
+        );
+    }
+}

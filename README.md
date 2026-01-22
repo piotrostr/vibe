@@ -11,7 +11,24 @@ Terminal-based kanban board for managing Claude Code sessions with git worktrees
 - **PR status tracking** - see PR state, merge conflicts, and CI status inline
 - **Claude activity monitoring** - see when Claude is thinking, idle, or waiting for input
 
-## Installation
+## Quick Setup with Claude
+
+If you have [Claude Code](https://github.com/anthropics/claude-code) installed, run:
+
+```bash
+claude --dangerously-skip-permissions "$(curl -fsSL https://raw.githubusercontent.com/piotrostr/vibe/main/setup-prompt.md)"
+```
+
+This will detect your OS, install dependencies, configure Zellij, set up the Claude statusline, and install vibe.
+
+## Manual Installation
+
+### Prerequisites
+
+- [Claude Code](https://github.com/anthropics/claude-code) - the AI coding assistant this tool orchestrates
+- [Rust](https://rustup.rs/) - for building vibe and worktrunk
+
+### Install vibe
 
 ```bash
 cargo install --git https://github.com/piotrostr/vibe
@@ -25,7 +42,7 @@ cd vibe
 cargo install --path .
 ```
 
-## Dependencies
+### Dependencies
 
 - [worktrunk](https://github.com/piotrostr/worktrunk) (`wt`) - git worktree manager
 - [zellij](https://zellij.dev/) - terminal multiplexer for Claude sessions

@@ -23,7 +23,7 @@ Reference documentation: https://github.com/piotrostr/vibe/blob/main/README.md
 
 4. **Install worktrunk** (git worktree manager):
    ```bash
-   cargo install --git https://github.com/piotrostr/worktrunk
+   cargo install --git https://github.com/max-sixty/worktrunk
    ```
 
 5. **Install vibe**:

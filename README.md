@@ -45,7 +45,7 @@ cargo install --path .
 
 ### Dependencies
 
-- [worktrunk](https://github.com/piotrostr/worktrunk) (`wt`) - git worktree manager
+- [worktrunk](https://github.com/max-sixty/worktrunk) (`wt`) - git worktree manager
 - [zellij](https://zellij.dev/) - terminal multiplexer for Claude sessions
 - [gh](https://cli.github.com/) (optional) - GitHub CLI for PR status
 

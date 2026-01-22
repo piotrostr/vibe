@@ -16,7 +16,8 @@ Terminal-based kanban board for managing Claude Code sessions with git worktrees
 If you have [Claude Code](https://github.com/anthropics/claude-code) installed, run:
 
 ```bash
-claude --dangerously-skip-permissions "$(curl -fsSL https://raw.githubusercontent.com/piotrostr/vibe/main/setup-prompt.md)"
+claude --dangerously-skip-permissions \
+  "$(curl -fsSL https://raw.githubusercontent.com/piotrostr/vibe/main/setup-prompt.md)"
 ```
 
 This will detect your OS, install dependencies, configure Zellij, set up the Claude statusline, and install vibe.

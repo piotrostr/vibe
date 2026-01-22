@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
+use crate::external::count_claude_processes;
 use crate::state::{AppState, linear_env_var_name};
 
 const LOGO: &str = r#"
@@ -15,7 +16,6 @@ const LOGO: &str = r#"
    \_/ |_|_.__/ \___|"#;
 
 pub fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
-    // If area is tall enough, render the ASCII logo
     if area.height >= 5 {
         render_header_with_logo(frame, area, state);
     } else {
@@ -26,8 +26,6 @@ pub fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
 fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
     let (project_info, project_name) = match &state.selected_project_id {
         Some(id) => {
-            // Try to find the project name in the projects list, otherwise use the id directly
-            // (in standalone mode, the projects list is empty and id is the project name)
             let name = state
                 .projects
                 .projects
@@ -52,19 +50,12 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
         None
     };
 
-    let status_text = if state.backend_connected {
-        "Connected"
-    } else {
-        "Disconnected"
-    };
-    let status_color = if state.backend_connected {
-        Color::Green
-    } else {
-        Color::Red
-    };
+    // Process counts
+    let claude_count = count_claude_processes();
+    let zellij_count = state.sessions.sessions.len();
 
     // Build lines: logo on left, status on right
-    let logo_lines: Vec<&str> = LOGO.lines().skip(1).collect(); // Skip empty first line
+    let logo_lines: Vec<&str> = LOGO.lines().skip(1).collect();
     let mut lines: Vec<Line> = Vec::new();
 
     for (i, logo_line) in logo_lines.iter().enumerate() {
@@ -77,8 +68,25 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
 
         // Add status info on the right side of the first few lines
         if i == 0 {
+            // Line 1: Process counts
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(status_text, Style::default().fg(status_color)));
+            spans.push(Span::styled(
+                format!("Claude: {}", claude_count),
+                Style::default().fg(if claude_count > 0 {
+                    Color::Green
+                } else {
+                    Color::DarkGray
+                }),
+            ));
+            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                format!("Zellij: {}", zellij_count),
+                Style::default().fg(if zellij_count > 0 {
+                    Color::Blue
+                } else {
+                    Color::DarkGray
+                }),
+            ));
         } else if i == 1 && !project_info.is_empty() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(

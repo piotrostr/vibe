@@ -1,5 +1,6 @@
 mod claude_activity;
 mod claude_plans;
+mod claude_usage;
 mod editor;
 mod gh;
 mod linear;
@@ -13,6 +14,7 @@ mod zellij;
 
 pub use claude_activity::ClaudeActivityTracker;
 pub use claude_plans::ClaudePlanReader;
+pub use claude_usage::count_claude_processes;
 pub use editor::edit_markdown;
 pub use gh::*;
 pub use linear::{LinearClient, LinearIssue, LinearIssueStatus};

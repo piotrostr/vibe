@@ -103,6 +103,7 @@ impl App {
         });
 
         // Spawn immediate background load for Claude process count
+        state.claude_count_loading = true;
         let cc_sender = claude_count_sender.clone();
         tokio::task::spawn_blocking(move || {
             let count = count_claude_processes();
@@ -363,6 +364,7 @@ impl App {
         // Non-blocking check for Claude process count results
         while let Ok(count) = self.claude_count_receiver.try_recv() {
             self.state.claude_process_count = count;
+            self.state.claude_count_loading = false;
         }
     }
 
@@ -1117,7 +1119,11 @@ impl App {
             .update_sessions(&mut self.state.sessions.sessions);
     }
 
-    fn poll_claude_count_async(&self) {
+    fn poll_claude_count_async(&mut self) {
+        if self.state.claude_count_loading {
+            return;
+        }
+        self.state.claude_count_loading = true;
         let sender = self.claude_count_sender.clone();
         tokio::task::spawn_blocking(move || {
             let count = count_claude_processes();

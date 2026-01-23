@@ -66,6 +66,9 @@ pub struct AppState {
 
     /// Cached count of running Claude processes (polled in background)
     pub claude_process_count: usize,
+
+    /// True when a Claude process count poll is in flight
+    pub claude_count_loading: bool,
 }
 
 impl AppState {
@@ -104,6 +107,7 @@ impl AppState {
             command_input: None,
 
             claude_process_count: 0,
+            claude_count_loading: false,
         }
     }
 

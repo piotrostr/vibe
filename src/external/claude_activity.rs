@@ -197,6 +197,7 @@ fn hash_working_dir(working_dir: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn test_hash_working_dir() {
@@ -228,5 +229,242 @@ mod tests {
 
         // No match
         assert!(!tracker.session_matches_working_dir("other-branch", "/Users/test/feature-branch"));
+    }
+
+    #[test]
+    fn test_parse_status_file_new_format() {
+        let json = r#"{
+            "working_dir": "/Users/test/my-project",
+            "session_id": "abc-123-def",
+            "input_tokens": 1500,
+            "output_tokens": 500,
+            "used_percentage": 25.5,
+            "api_duration_ms": 45000,
+            "timestamp": 1700000000
+        }"#;
+
+        let status: ClaudeStatusFile = serde_json::from_str(json).unwrap();
+        assert_eq!(status.working_dir, "/Users/test/my-project");
+        assert_eq!(status.session_id, Some("abc-123-def".to_string()));
+        assert_eq!(status.input_tokens, Some(1500));
+        assert_eq!(status.output_tokens, Some(500));
+        assert_eq!(status.used_percentage, Some(25.5));
+        assert_eq!(status.api_duration_ms, Some(45000));
+        assert_eq!(status.timestamp, 1700000000);
+    }
+
+    #[test]
+    fn test_parse_status_file_old_format() {
+        // Old format without new fields - should still parse with defaults
+        let json = r#"{
+            "working_dir": "/Users/test/my-project",
+            "input_tokens": 1500,
+            "output_tokens": 500,
+            "timestamp": 1700000000
+        }"#;
+
+        let status: ClaudeStatusFile = serde_json::from_str(json).unwrap();
+        assert_eq!(status.working_dir, "/Users/test/my-project");
+        assert_eq!(status.session_id, None);
+        assert_eq!(status.used_percentage, None);
+        assert_eq!(status.api_duration_ms, None);
+    }
+
+    #[test]
+    fn test_parse_status_file_null_values() {
+        // JSON with explicit null values (as produced by jq when fields missing)
+        let json = r#"{
+            "working_dir": "/Users/test/my-project",
+            "session_id": "",
+            "input_tokens": null,
+            "output_tokens": null,
+            "used_percentage": null,
+            "api_duration_ms": null,
+            "timestamp": 1700000000
+        }"#;
+
+        let status: ClaudeStatusFile = serde_json::from_str(json).unwrap();
+        assert_eq!(status.input_tokens, None);
+        assert_eq!(status.output_tokens, None);
+        assert_eq!(status.used_percentage, None);
+        assert_eq!(status.api_duration_ms, None);
+    }
+
+    #[test]
+    fn test_activity_state_thinking_api_duration_increasing() {
+        let mut tracker = ClaudeActivityTracker::new();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // First snapshot
+        let status1 = ClaudeStatusFile {
+            working_dir: "/test/project".to_string(),
+            session_id: Some("test-session".to_string()),
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            used_percentage: Some(10.0),
+            api_duration_ms: Some(1000),
+            timestamp: now,
+        };
+        let result1 = tracker.determine_state(&status1);
+        // First time seeing - should be WaitingForUser since fresh
+        assert_eq!(result1.state, ClaudeActivityState::WaitingForUser);
+
+        // Second snapshot with increased api_duration_ms
+        let status2 = ClaudeStatusFile {
+            working_dir: "/test/project".to_string(),
+            session_id: Some("test-session".to_string()),
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            used_percentage: Some(10.0),
+            api_duration_ms: Some(2000), // Increased!
+            timestamp: now,
+        };
+        let result2 = tracker.determine_state(&status2);
+        assert_eq!(result2.state, ClaudeActivityState::Thinking);
+    }
+
+    #[test]
+    fn test_activity_state_waiting_stable() {
+        let mut tracker = ClaudeActivityTracker::new();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // First snapshot
+        let status1 = ClaudeStatusFile {
+            working_dir: "/test/project".to_string(),
+            session_id: None,
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            used_percentage: Some(10.0),
+            api_duration_ms: Some(1000),
+            timestamp: now,
+        };
+        tracker.determine_state(&status1);
+
+        // Second snapshot - same values, recent timestamp
+        let status2 = ClaudeStatusFile {
+            working_dir: "/test/project".to_string(),
+            session_id: None,
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            used_percentage: Some(10.0),
+            api_duration_ms: Some(1000), // Same
+            timestamp: now,
+        };
+        let result = tracker.determine_state(&status2);
+        assert_eq!(result.state, ClaudeActivityState::WaitingForUser);
+    }
+
+    #[test]
+    fn test_activity_state_idle_stale() {
+        let mut tracker = ClaudeActivityTracker::new();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // Stale timestamp (>30s old)
+        let status = ClaudeStatusFile {
+            working_dir: "/test/project".to_string(),
+            session_id: None,
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            used_percentage: Some(10.0),
+            api_duration_ms: Some(1000),
+            timestamp: now - 60, // 60 seconds ago
+        };
+        let result = tracker.determine_state(&status);
+        assert_eq!(result.state, ClaudeActivityState::Idle);
+    }
+
+    #[test]
+    fn test_context_percentage_returned() {
+        let mut tracker = ClaudeActivityTracker::new();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let status = ClaudeStatusFile {
+            working_dir: "/test/project".to_string(),
+            session_id: None,
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            used_percentage: Some(75.5),
+            api_duration_ms: Some(1000),
+            timestamp: now,
+        };
+        let result = tracker.determine_state(&status);
+        assert_eq!(result.context_percentage, Some(75.5));
+    }
+
+    #[test]
+    #[ignore] // Run with: cargo test test_read_live_activity -- --ignored
+    fn test_read_live_activity_file() {
+        // This test reads from the actual activity directory
+        // Use the current worktree as a test case
+        let working_dir = "/Users/piotrostr/vibe.close-a-claude-code-session-or-zellij-session";
+        let expected_hash = "cb7e56a8e4fc216c";
+
+        // Verify hash calculation
+        let hash = hash_working_dir(working_dir);
+        assert_eq!(hash, expected_hash);
+
+        // Try to read the activity file
+        let state_dir = dirs::home_dir()
+            .unwrap()
+            .join(".vibe")
+            .join("claude-activity");
+        let file_path = state_dir.join(format!("{}.json", expected_hash));
+
+        if file_path.exists() {
+            let content = fs::read_to_string(&file_path).unwrap();
+            println!("Activity file content:\n{}", content);
+
+            let status: ClaudeStatusFile = serde_json::from_str(&content).unwrap();
+            println!("Parsed status: {:?}", status);
+
+            assert_eq!(status.working_dir, working_dir);
+            // New fields should be present if statusline was updated
+            println!("session_id: {:?}", status.session_id);
+            println!("used_percentage: {:?}", status.used_percentage);
+            println!("api_duration_ms: {:?}", status.api_duration_ms);
+        } else {
+            println!(
+                "Activity file not found at {:?} - start a Claude session in this worktree first",
+                file_path
+            );
+        }
+    }
+
+    #[test]
+    #[ignore] // Run with: cargo test test_tracker_with_live_session -- --ignored
+    fn test_tracker_with_live_session() {
+        // Test the full tracker flow with a live session
+        let mut tracker = ClaudeActivityTracker::new();
+
+        // The session name would be derived from the branch
+        let session_name = "close-a-claude-code-session-or-zellij-session";
+        let result = tracker.get_activity_for_session(session_name);
+
+        println!("Activity state: {:?}", result.state);
+        println!("Context percentage: {:?}", result.context_percentage);
+
+        // If we found a matching session, we should get a known state
+        assert!(
+            matches!(
+                result.state,
+                ClaudeActivityState::Thinking
+                    | ClaudeActivityState::WaitingForUser
+                    | ClaudeActivityState::Idle
+                    | ClaudeActivityState::Unknown
+            ),
+            "Expected a valid activity state"
+        );
     }
 }

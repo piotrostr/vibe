@@ -7,25 +7,42 @@ use serde::Deserialize;
 
 use super::ClaudeActivityState;
 
-const STALE_THRESHOLD_SECS: u64 = 2;
+// Thresholds for activity detection
+const WAITING_THRESHOLD_SECS: u64 = 10; // Recent activity, waiting for user
+const IDLE_THRESHOLD_SECS: u64 = 30; // No updates for this long = idle
 
 #[derive(Debug, Deserialize)]
 struct ClaudeStatusFile {
     working_dir: String,
+    #[serde(default)]
+    #[allow(dead_code)] // Captured for future correlation
+    session_id: Option<String>,
+    #[allow(dead_code)] // Kept for debugging
     input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    #[serde(default)]
+    used_percentage: Option<f64>,
+    #[serde(default)]
+    api_duration_ms: Option<u64>,
     timestamp: u64,
 }
 
 #[derive(Debug, Clone)]
-struct TokenSnapshot {
-    input_tokens: Option<u64>,
+struct ActivitySnapshot {
+    api_duration_ms: Option<u64>,
     output_tokens: Option<u64>,
+}
+
+/// Result of activity detection, includes state and context usage
+#[derive(Debug, Clone)]
+pub struct ActivityResult {
+    pub state: ClaudeActivityState,
+    pub context_percentage: Option<f64>,
 }
 
 pub struct ClaudeActivityTracker {
     state_dir: PathBuf,
-    previous_snapshots: HashMap<String, TokenSnapshot>,
+    previous_snapshots: HashMap<String, ActivitySnapshot>,
 }
 
 impl ClaudeActivityTracker {
@@ -40,13 +57,16 @@ impl ClaudeActivityTracker {
         }
     }
 
-    pub fn get_activity_for_session(&mut self, session_name: &str) -> ClaudeActivityState {
+    pub fn get_activity_for_session(&mut self, session_name: &str) -> ActivityResult {
         // Try to find a status file that matches this session name
         // The status file is named by MD5 hash of the working directory
         // We need to scan all files and match by session name in the working_dir
 
         let Ok(entries) = fs::read_dir(&self.state_dir) else {
-            return ClaudeActivityState::Unknown;
+            return ActivityResult {
+                state: ClaudeActivityState::Unknown,
+                context_percentage: None,
+            };
         };
 
         for entry in entries.flatten() {
@@ -60,7 +80,10 @@ impl ClaudeActivityTracker {
             }
         }
 
-        ClaudeActivityState::Unknown
+        ActivityResult {
+            state: ClaudeActivityState::Unknown,
+            context_percentage: None,
+        }
     }
 
     fn session_matches_working_dir(&self, session_name: &str, working_dir: &str) -> bool {
@@ -80,53 +103,79 @@ impl ClaudeActivityTracker {
         normalized_dir.contains(&normalized_session)
     }
 
-    fn determine_state(&mut self, status: &ClaudeStatusFile) -> ClaudeActivityState {
+    fn determine_state(&mut self, status: &ClaudeStatusFile) -> ActivityResult {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        // Check if status is stale (>2s old)
-        if now.saturating_sub(status.timestamp) > STALE_THRESHOLD_SECS {
-            return ClaudeActivityState::Idle;
+        let age_secs = now.saturating_sub(status.timestamp);
+
+        // Check if status is stale (>30s old) - definitely idle
+        if age_secs > IDLE_THRESHOLD_SECS {
+            return ActivityResult {
+                state: ClaudeActivityState::Idle,
+                context_percentage: status.used_percentage,
+            };
         }
 
-        // If tokens are null, we have no session data
-        let (Some(input), Some(output)) = (status.input_tokens, status.output_tokens) else {
-            return ClaudeActivityState::Unknown;
-        };
-
-        let current_snapshot = TokenSnapshot {
-            input_tokens: Some(input),
-            output_tokens: Some(output),
+        let current_snapshot = ActivitySnapshot {
+            api_duration_ms: status.api_duration_ms,
+            output_tokens: status.output_tokens,
         };
 
         // Check against previous snapshot
         let state = if let Some(prev) = self.previous_snapshots.get(&status.working_dir) {
-            // Compare tokens - if changed, Claude is thinking
-            if prev.input_tokens != current_snapshot.input_tokens
-                || prev.output_tokens != current_snapshot.output_tokens
+            // Primary signal: api_duration_ms increasing means Claude is making API calls
+            let api_duration_changed = match (prev.api_duration_ms, current_snapshot.api_duration_ms)
             {
+                (Some(prev_dur), Some(curr_dur)) => curr_dur > prev_dur,
+                (None, Some(_)) => true, // Started making calls
+                _ => false,
+            };
+
+            // Secondary signal: output tokens increasing
+            let tokens_changed = match (prev.output_tokens, current_snapshot.output_tokens) {
+                (Some(prev_tok), Some(curr_tok)) => curr_tok > prev_tok,
+                (None, Some(_)) => true,
+                _ => false,
+            };
+
+            if api_duration_changed || tokens_changed {
+                // Actively working
                 ClaudeActivityState::Thinking
-            } else {
-                // Tokens unchanged - Claude is waiting for user
+            } else if age_secs < WAITING_THRESHOLD_SECS {
+                // Recent activity but stable - waiting for user
                 ClaudeActivityState::WaitingForUser
+            } else {
+                // Stable for a while, getting stale
+                ClaudeActivityState::Idle
             }
         } else {
-            // First time seeing this session - assume thinking if we have tokens
-            ClaudeActivityState::Thinking
+            // First time seeing this session
+            if age_secs < WAITING_THRESHOLD_SECS {
+                // Fresh data, assume waiting for user (just started or just finished)
+                ClaudeActivityState::WaitingForUser
+            } else {
+                ClaudeActivityState::Idle
+            }
         };
 
         // Update snapshot
         self.previous_snapshots
             .insert(status.working_dir.clone(), current_snapshot);
 
-        state
+        ActivityResult {
+            state,
+            context_percentage: status.used_percentage,
+        }
     }
 
     pub fn update_sessions(&mut self, sessions: &mut [super::ZellijSession]) {
         for session in sessions.iter_mut() {
-            session.claude_activity = self.get_activity_for_session(&session.name);
+            let result = self.get_activity_for_session(&session.name);
+            session.claude_activity = result.state;
+            session.context_percentage = result.context_percentage;
         }
     }
 }

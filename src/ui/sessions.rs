@@ -61,7 +61,8 @@ pub fn render_sessions(frame: &mut Frame, area: Rect, state: &SessionsState, spi
                 Style::default().fg(Color::White)
             };
 
-            let status_marker = if session.is_current {
+            // Activity indicator
+            let activity_marker = if session.is_current {
                 Span::styled(" (attached)", Style::default().fg(Color::Yellow))
             } else if session.is_dead {
                 Span::styled(" (dead)", Style::default().fg(Color::DarkGray))
@@ -95,10 +96,25 @@ pub fn render_sessions(frame: &mut Frame, area: Rect, state: &SessionsState, spi
                 }
             };
 
+            // Context percentage indicator
+            let context_marker = if let Some(pct) = session.context_percentage {
+                let color = if pct > 90.0 {
+                    Color::Red
+                } else if pct > 70.0 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                };
+                Span::styled(format!(" {:.0}%", pct), Style::default().fg(color))
+            } else {
+                Span::raw("")
+            };
+
             ListItem::new(Line::from(vec![
                 Span::raw(if is_selected { "> " } else { "  " }),
                 Span::styled(&session.name, base_style),
-                status_marker,
+                activity_marker,
+                context_marker,
             ]))
         })
         .collect();

@@ -134,13 +134,16 @@ Reference documentation: https://github.com/piotrostr/vibe/blob/main/README.md
 
     input=$(cat)
     working_dir=$(echo "$input" | jq -r '.workspace.current_dir // empty')
+    session_id=$(echo "$input" | jq -r '.session_id // empty')
     input_tokens=$(echo "$input" | jq -r '.context_window.current_usage.input_tokens // "null"')
     output_tokens=$(echo "$input" | jq -r '.context_window.current_usage.output_tokens // "null"')
+    used_pct=$(echo "$input" | jq -r '.context_window.used_percentage // "null"')
+    api_duration_ms=$(echo "$input" | jq -r '.cost.total_api_duration_ms // "null"')
 
     if [ -n "$working_dir" ]; then
         dir_hash=$(echo -n "$working_dir" | md5sum 2>/dev/null | cut -c1-16 || echo -n "$working_dir" | md5 | cut -c1-16)
         cat > "$STATE_DIR/$dir_hash.json" << EOF
-    {"working_dir":"$working_dir","input_tokens":$input_tokens,"output_tokens":$output_tokens,"timestamp":$(date +%s)}
+    {"working_dir":"$working_dir","session_id":"$session_id","input_tokens":$input_tokens,"output_tokens":$output_tokens,"used_percentage":$used_pct,"api_duration_ms":$api_duration_ms,"timestamp":$(date +%s)}
     EOF
     fi
 

@@ -211,7 +211,7 @@ Key bindings (tmux-like with `Ctrl+b` prefix):
 
 ### Claude Activity Indication
 
-For real-time Claude session status indicators (thinking/waiting/idle), configure Claude Code's statusline:
+For real-time Claude session status indicators (thinking/waiting/idle) and context window usage, configure Claude Code's statusline:
 
 1. Create `~/.vibe/claude-statusline.sh`:
 
@@ -222,13 +222,16 @@ mkdir -p "$STATE_DIR"
 
 input=$(cat)
 working_dir=$(echo "$input" | jq -r '.workspace.current_dir // empty')
+session_id=$(echo "$input" | jq -r '.session_id // empty')
 input_tokens=$(echo "$input" | jq -r '.context_window.current_usage.input_tokens // "null"')
 output_tokens=$(echo "$input" | jq -r '.context_window.current_usage.output_tokens // "null"')
+used_pct=$(echo "$input" | jq -r '.context_window.used_percentage // "null"')
+api_duration_ms=$(echo "$input" | jq -r '.cost.total_api_duration_ms // "null"')
 
 if [ -n "$working_dir" ]; then
     dir_hash=$(echo -n "$working_dir" | md5 | cut -c1-16)
     cat > "$STATE_DIR/$dir_hash.json" << EOF
-{"working_dir":"$working_dir","input_tokens":$input_tokens,"output_tokens":$output_tokens,"timestamp":$(date +%s)}
+{"working_dir":"$working_dir","session_id":"$session_id","input_tokens":$input_tokens,"output_tokens":$output_tokens,"used_percentage":$used_pct,"api_duration_ms":$api_duration_ms,"timestamp":$(date +%s)}
 EOF
 fi
 
@@ -252,9 +255,10 @@ branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 ```
 
 Activity indicators in vibe:
-- Spinner (yellow) - Claude is thinking
-- `[!]` (red) - Claude is waiting for input
-- `[-]` (gray) - Session idle/stale
+- Spinner (yellow) - Claude is actively thinking (API calls in progress)
+- `[!]` (red) - Claude is waiting for user input
+- `[-]` (gray) - Session idle (no activity for 30+ seconds)
+- `25%` (gray/yellow/red) - Context window usage (red when >90%)
 
 ## License
 

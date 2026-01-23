@@ -192,6 +192,7 @@ fn render_row(
                 ));
 
                 if let Some(session) = sessions.session_for_branch(&wt.branch) {
+                    // Claude activity indicator
                     match session.claude_activity {
                         ClaudeActivityState::Thinking => {
                             spans.push(Span::styled(
@@ -221,6 +222,18 @@ fn render_row(
                                 spans.push(Span::styled(" ", Style::default().fg(Color::Green)));
                             }
                         }
+                    }
+
+                    // Context window percentage
+                    if let Some(pct) = session.context_percentage {
+                        let color = if pct > 90.0 {
+                            Color::Red
+                        } else if pct > 70.0 {
+                            Color::Yellow
+                        } else {
+                            Color::DarkGray
+                        };
+                        spans.push(Span::styled(format!(" {:.0}%", pct), Style::default().fg(color)));
                     }
                 }
             }

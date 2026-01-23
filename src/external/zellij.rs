@@ -20,6 +20,7 @@ pub struct ZellijSession {
     pub is_dead: bool,
     pub needs_attention: bool,
     pub claude_activity: ClaudeActivityState,
+    pub context_percentage: Option<f64>,
 }
 
 pub fn list_sessions() -> Result<Vec<ZellijSession>> {
@@ -53,6 +54,7 @@ pub fn list_sessions() -> Result<Vec<ZellijSession>> {
                 is_dead,
                 needs_attention: false,
                 claude_activity: ClaudeActivityState::Unknown,
+                context_percentage: None,
             }
         })
         .collect();

@@ -191,49 +191,46 @@ fn render_row(
                     Style::default().fg(Color::DarkGray),
                 ));
 
-                if let Some(session) = sessions.session_for_branch(&wt.branch) {
-                    // Claude activity indicator
-                    match session.claude_activity {
-                        ClaudeActivityState::Thinking => {
-                            spans.push(Span::styled(
-                                format!(" [{}]", spinner_char),
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .add_modifier(Modifier::BOLD),
-                            ));
-                        }
-                        ClaudeActivityState::WaitingForUser => {
-                            spans.push(Span::styled(
-                                " [!]",
-                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                            ));
-                        }
-                        ClaudeActivityState::Idle => {
-                            spans.push(Span::styled(" [-]", Style::default().fg(Color::DarkGray)));
-                        }
-                        ClaudeActivityState::Unknown => {
-                            // Fall back to legacy needs_attention check
-                            if session.needs_attention {
+                // Skip session indicators for Done tasks - they're finished
+                if status != TaskStatus::Done {
+                    if let Some(session) = sessions.session_for_branch(&wt.branch) {
+                        // Claude activity indicator - only show when active or needs attention
+                        match session.claude_activity {
+                            ClaudeActivityState::Thinking => {
+                                spans.push(Span::styled(
+                                    format!(" [{}]", spinner_char),
+                                    Style::default()
+                                        .fg(Color::Yellow)
+                                        .add_modifier(Modifier::BOLD),
+                                ));
+                            }
+                            ClaudeActivityState::WaitingForUser => {
                                 spans.push(Span::styled(
                                     " [!]",
                                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                                 ));
-                            } else {
-                                spans.push(Span::styled(" ", Style::default().fg(Color::Green)));
                             }
+                            ClaudeActivityState::Unknown if session.needs_attention => {
+                                spans.push(Span::styled(
+                                    " [!]",
+                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                                ));
+                            }
+                            // Idle and Unknown without attention - don't show indicator
+                            _ => {}
                         }
-                    }
 
-                    // Context window percentage
-                    if let Some(pct) = session.context_percentage {
-                        let color = if pct > 90.0 {
-                            Color::Red
-                        } else if pct > 70.0 {
-                            Color::Yellow
-                        } else {
-                            Color::DarkGray
-                        };
-                        spans.push(Span::styled(format!(" {:.0}%", pct), Style::default().fg(color)));
+                        // Context window percentage (always show if available, useful info)
+                        if let Some(pct) = session.context_percentage {
+                            let color = if pct > 90.0 {
+                                Color::Red
+                            } else if pct > 70.0 {
+                                Color::Yellow
+                            } else {
+                                Color::DarkGray
+                            };
+                            spans.push(Span::styled(format!(" {:.0}%", pct), Style::default().fg(color)));
+                        }
                     }
                 }
             }

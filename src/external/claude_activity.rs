@@ -8,8 +8,9 @@ use serde::Deserialize;
 use super::ClaudeActivityState;
 
 // Thresholds for activity detection
-const WAITING_THRESHOLD_SECS: u64 = 10; // Recent activity, waiting for user
-const IDLE_THRESHOLD_SECS: u64 = 30; // No updates for this long = idle
+// Claude statusline updates on events, not continuously, so use generous thresholds
+const WAITING_THRESHOLD_SECS: u64 = 30; // Recent activity, waiting for user
+const IDLE_THRESHOLD_SECS: u64 = 300; // 5 minutes - no updates for this long = idle
 
 #[derive(Debug, Deserialize)]
 struct ClaudeStatusFile {
@@ -368,7 +369,7 @@ mod tests {
             .unwrap()
             .as_secs();
 
-        // Stale timestamp (>30s old)
+        // Stale timestamp (>5 minutes old)
         let status = ClaudeStatusFile {
             working_dir: "/test/project".to_string(),
             session_id: None,
@@ -376,7 +377,7 @@ mod tests {
             output_tokens: Some(50),
             used_percentage: Some(10.0),
             api_duration_ms: Some(1000),
-            timestamp: now - 60, // 60 seconds ago
+            timestamp: now - 600, // 10 minutes ago
         };
         let result = tracker.determine_state(&status);
         assert_eq!(result.state, ClaudeActivityState::Idle);

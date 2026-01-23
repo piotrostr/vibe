@@ -263,8 +263,10 @@ pub fn launch_zellij_claude_in_worktree(
     }
 
     // Both fresh and continue use --continue since this is for existing worktrees
+    // Plan mode: no dangerous permissions (blue mode)
+    // Non-plan mode: dangerous permissions (red mode)
     let claude_cmd = if plan_mode {
-        "claude --continue --dangerously-skip-permissions --plan"
+        "claude --continue --plan"
     } else {
         "claude --continue --dangerously-skip-permissions"
     };
@@ -329,13 +331,12 @@ pub fn launch_zellij_claude_in_worktree_with_context(
 
     // Fresh: pass prompt as positional argument
     // Continue: use --continue for EXITED sessions
+    // Plan mode: no dangerous permissions (blue mode)
+    // Non-plan mode: dangerous permissions (red mode)
     let (fresh_cmd, continue_cmd) = if plan_mode {
         (
-            format!(
-                "claude --dangerously-skip-permissions --plan \"$(cat {})\"",
-                context_file.display()
-            ),
-            "claude --continue --dangerously-skip-permissions --plan".to_string(),
+            format!("claude --plan \"$(cat {})\"", context_file.display()),
+            "claude --continue --plan".to_string(),
         )
     } else {
         (

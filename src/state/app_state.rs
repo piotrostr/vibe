@@ -9,7 +9,6 @@ pub enum View {
     Kanban,
     TaskDetail,
     Worktrees,
-    Sessions,
     #[allow(dead_code)]
     Logs,
     Search,

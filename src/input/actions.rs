@@ -18,11 +18,8 @@ pub enum Action {
     CreateWorktree,
     SwitchWorktree,
 
-    ShowSessions,
     LaunchSession,
     LaunchSessionPlan,
-    AttachSession,
-    KillSession,
     ViewPR,
     BindPR,
 

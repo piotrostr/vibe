@@ -201,13 +201,7 @@ pub fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         }
         crate::state::View::Worktrees => {
             format!(
-                "{}j/k: nav | Enter: switch | s: session | /: search | Esc: back",
-                search_indicator
-            )
-        }
-        crate::state::View::Sessions => {
-            format!(
-                "{}j/k: nav | Enter/a: attach | K: kill | /: search | Esc: back",
+                "{}j/k: nav | Enter: switch | g: session | /: search | Esc: back",
                 search_indicator
             )
         }

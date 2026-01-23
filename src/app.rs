@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::external::{
     BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader, LinearClient, LinearIssue,
-    LinearIssueStatus, WorktreeInfo, ZellijSession, attach_zellij_foreground,
+    LinearIssueStatus, WorktreeInfo, ZellijSession,
     count_claude_processes, edit_markdown, get_pr_for_branch, launch_zellij_claude_in_worktree,
     launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
 };
@@ -15,7 +15,7 @@ use crate::storage::TaskStorage;
 use crate::terminal::Terminal;
 use crate::ui::{
     render_footer, render_header, render_help_modal, render_kanban_board, render_logs,
-    render_logs_overlay, render_search, render_sessions, render_task_detail_with_actions,
+    render_logs_overlay, render_search, render_task_detail_with_actions,
     render_worktrees,
 };
 
@@ -432,14 +432,6 @@ impl App {
                 View::Worktrees => {
                     render_worktrees(frame, chunks[1], &self.state.worktrees);
                 }
-                View::Sessions => {
-                    render_sessions(
-                        frame,
-                        chunks[1],
-                        &self.state.sessions,
-                        self.state.spinner_char(),
-                    );
-                }
                 View::Logs => {
                     render_logs(frame, chunks[1], &self.state.logs);
                 }
@@ -545,9 +537,6 @@ impl App {
             Action::SwitchWorktree => {
                 // TODO: Implement worktree switching
             }
-            Action::ShowSessions => {
-                self.handle_show_sessions()?;
-            }
             Action::LaunchSession => {
                 self.handle_launch_session(terminal, false)?;
             }
@@ -561,13 +550,6 @@ impl App {
                 // PR binding not available in standalone mode
                 tracing::info!("PR binding requires server mode");
             }
-            Action::AttachSession => {
-                self.handle_attach_session(terminal)?;
-            }
-            Action::KillSession => {
-                self.handle_kill_session()?;
-            }
-
             // Search actions
             Action::StartSearch => {
                 // Populate search with current tasks and switch to search view
@@ -704,7 +686,7 @@ impl App {
                 self.state.selected_task_plan = None;
                 self.state.view = View::Kanban;
             }
-            View::Worktrees | View::Sessions | View::Logs => {
+            View::Worktrees | View::Logs => {
                 self.state.view = View::Kanban;
             }
             View::Search => {
@@ -738,9 +720,6 @@ impl App {
             View::Worktrees => {
                 self.state.worktrees.select_prev();
             }
-            View::Sessions => {
-                self.state.sessions.select_prev();
-            }
             View::Logs => {
                 self.state.logs.scroll_up();
             }
@@ -772,9 +751,6 @@ impl App {
             View::TaskDetail => {}
             View::Worktrees => {
                 self.state.worktrees.select_next();
-            }
-            View::Sessions => {
-                self.state.sessions.select_next();
             }
             View::Logs => {
                 self.state.logs.scroll_down();
@@ -849,10 +825,6 @@ impl App {
                 // Launch session in selected worktree
                 self.handle_launch_session(terminal, false)?;
             }
-            View::Sessions => {
-                // Attach to selected session
-                self.handle_attach_session(terminal)?;
-            }
             View::Logs => {
                 // Refresh logs on select
                 self.state.logs.refresh();
@@ -883,9 +855,6 @@ impl App {
             }
             View::Worktrees => {
                 self.load_worktrees();
-            }
-            View::Sessions => {
-                self.load_sessions();
             }
             View::Logs => {
                 self.state.logs.refresh();
@@ -1072,29 +1041,6 @@ impl App {
         });
     }
 
-    fn handle_show_sessions(&mut self) -> Result<()> {
-        self.load_sessions();
-        self.state.view = View::Sessions;
-        Ok(())
-    }
-
-    fn load_sessions(&mut self) {
-        // Skip if already loading
-        if self.state.sessions.loading {
-            return;
-        }
-
-        self.state.sessions.loading = true;
-        self.state.sessions.error = None;
-
-        // Spawn background task
-        let sender = self.session_sender.clone();
-        tokio::task::spawn_blocking(move || {
-            let result = list_sessions_with_status().map_err(|e| e.to_string());
-            let _ = sender.blocking_send(result);
-        });
-    }
-
     fn poll_sessions_async(&mut self) {
         // Spawn background task to refresh session status
         // Only if not already loading (avoid stacking requests)
@@ -1247,46 +1193,6 @@ impl App {
         Ok(())
     }
 
-    fn handle_attach_session(&mut self, terminal: &mut Terminal) -> Result<()> {
-        let Some(session) = self.state.sessions.selected() else {
-            tracing::warn!("No session selected");
-            return Ok(());
-        };
-
-        let session_name = session.name.clone();
-
-        // Suspend TUI, attach to zellij, then resume TUI
-        terminal.suspend()?;
-
-        let result = attach_zellij_foreground(&session_name);
-
-        terminal.resume()?;
-
-        if let Err(e) = result {
-            tracing::error!("Failed to attach session: {}", e);
-        } else {
-            tracing::info!("Returned from session {}", session_name);
-        }
-
-        Ok(())
-    }
-
-    fn handle_kill_session(&mut self) -> Result<()> {
-        let Some(session) = self.state.sessions.selected() else {
-            tracing::warn!("No session selected");
-            return Ok(());
-        };
-
-        if let Err(e) = crate::external::kill_session(&session.name) {
-            tracing::error!("Failed to kill session: {}", e);
-        } else {
-            tracing::info!("Killed session {}", session.name);
-            // Refresh the sessions list
-            self.load_sessions();
-        }
-
-        Ok(())
-    }
 }
 
 /// Convert task title to a branch name slug.

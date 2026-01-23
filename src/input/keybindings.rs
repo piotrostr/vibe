@@ -60,7 +60,6 @@ pub fn key_to_action(
         View::Kanban => kanban_bindings(key),
         View::TaskDetail => task_detail_bindings(key),
         View::Worktrees => worktrees_bindings(key),
-        View::Sessions => sessions_bindings(key),
         View::Logs => logs_bindings(key),
         View::Search => search_bindings(key),
     }
@@ -156,10 +155,9 @@ fn kanban_bindings(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('v'), KeyModifiers::NONE) => Some(Action::ViewPR),
         (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Action::BindPR),
 
-        // Worktrees and sessions views
+        // Worktrees view
         (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Action::ShowWorktrees),
         (KeyCode::Char('W'), KeyModifiers::SHIFT) => Some(Action::CreateWorktree),
-        (KeyCode::Char('S'), KeyModifiers::SHIFT) => Some(Action::ShowSessions),
 
         // Linear sync
         (KeyCode::Char('L'), KeyModifiers::SHIFT) => Some(Action::SyncLinear),
@@ -184,7 +182,6 @@ fn task_detail_bindings(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('r') => Some(Action::Refresh),
         KeyCode::Enter | KeyCode::Char(' ') => Some(Action::LaunchSession),
         KeyCode::Char('w') => Some(Action::ShowWorktrees),
-        KeyCode::Char('S') => Some(Action::ShowSessions),
         _ => None,
     }
 }
@@ -197,20 +194,8 @@ fn worktrees_bindings(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('g') => Some(Action::LaunchSession),
         KeyCode::Char('p') => Some(Action::LaunchSessionPlan),
         KeyCode::Char('W') => Some(Action::CreateWorktree),
-        KeyCode::Char('S') => Some(Action::ShowSessions),
         KeyCode::Char('r') => Some(Action::Refresh),
         _ => None,
     }
 }
 
-fn sessions_bindings(key: KeyEvent) -> Option<Action> {
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
-        KeyCode::Enter | KeyCode::Char('a') => Some(Action::AttachSession),
-        KeyCode::Char('K') => Some(Action::KillSession),
-        KeyCode::Char('w') => Some(Action::ShowWorktrees),
-        KeyCode::Char('r') => Some(Action::Refresh),
-        _ => None,
-    }
-}

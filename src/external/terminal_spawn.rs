@@ -266,7 +266,7 @@ pub fn launch_zellij_claude_in_worktree(
     // Plan mode: no dangerous permissions (blue mode)
     // Non-plan mode: dangerous permissions (red mode)
     let claude_cmd = if plan_mode {
-        "claude --continue --plan"
+        "claude --continue --permission-mode plan"
     } else {
         "claude --continue --dangerously-skip-permissions"
     };
@@ -335,8 +335,8 @@ pub fn launch_zellij_claude_in_worktree_with_context(
     // Non-plan mode: dangerous permissions (red mode)
     let (fresh_cmd, continue_cmd) = if plan_mode {
         (
-            format!("claude --plan \"$(cat {})\"", context_file.display()),
-            "claude --continue --plan".to_string(),
+            format!("claude --permission-mode plan \"$(cat {})\"", context_file.display()),
+            "claude --continue --permission-mode plan".to_string(),
         )
     } else {
         (

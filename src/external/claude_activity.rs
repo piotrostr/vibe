@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Result;
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Deserialize;
+use tokio::sync::mpsc;
 
 use super::ClaudeActivityState;
 
@@ -179,12 +182,79 @@ impl ClaudeActivityTracker {
             session.context_percentage = result.context_percentage;
         }
     }
+
+    /// Update activity state from a specific file (used by file watcher)
+    pub fn update_from_file(&mut self, path: &Path) -> Option<ActivityResult> {
+        let content = fs::read_to_string(path).ok()?;
+        let status: ClaudeStatusFile = serde_json::from_str(&content).ok()?;
+        Some(self.determine_state(&status))
+    }
 }
 
 impl Default for ClaudeActivityTracker {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// File watcher for instant activity detection
+pub struct ActivityWatcher {
+    _watcher: RecommendedWatcher,
+}
+
+impl ActivityWatcher {
+    pub fn new(sender: mpsc::Sender<PathBuf>) -> Result<Self> {
+        let mut watcher = RecommendedWatcher::new(
+            move |res: Result<Event, notify::Error>| {
+                if let Ok(event) = res {
+                    if matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_)
+                    ) {
+                        for path in event.paths {
+                            if path.extension().map(|e| e == "json").unwrap_or(false) {
+                                let _ = sender.blocking_send(path);
+                            }
+                        }
+                    }
+                }
+            },
+            Config::default(),
+        )?;
+
+        let activity_dir = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("No home directory"))?
+            .join(".vibe")
+            .join("claude-activity");
+
+        // Create directory if it doesn't exist
+        fs::create_dir_all(&activity_dir)?;
+
+        watcher.watch(&activity_dir, RecursiveMode::NonRecursive)?;
+
+        Ok(Self { _watcher: watcher })
+    }
+}
+
+/// Count active Claude sessions by counting activity files
+pub fn count_active_sessions() -> usize {
+    let activity_dir = dirs::home_dir()
+        .map(|h| h.join(".vibe").join("claude-activity"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/claude-activity"));
+
+    fs::read_dir(&activity_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.path()
+                        .extension()
+                        .map(|ext| ext == "json")
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

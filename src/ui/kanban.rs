@@ -184,14 +184,8 @@ fn render_row(
                 spans.push(Span::styled(" [L]", Style::default().fg(Color::Blue)));
             }
 
-            // Worktree/branch display
+            // Session indicators for tasks with worktrees (skip Done tasks)
             if let Some(wt) = matching_worktree {
-                spans.push(Span::styled(
-                    format!(" ({})", wt.branch),
-                    Style::default().fg(Color::DarkGray),
-                ));
-
-                // Skip session indicators for Done tasks - they're finished
                 if status != TaskStatus::Done {
                     if let Some(session) = sessions.session_for_branch(&wt.branch) {
                         // Claude activity indicator - only show when active or needs attention

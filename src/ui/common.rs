@@ -6,7 +6,6 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::external::count_claude_processes;
 use crate::state::{AppState, linear_env_var_name};
 
 const LOGO: &str = r#"
@@ -50,8 +49,8 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
         None
     };
 
-    // Process counts
-    let claude_count = count_claude_processes();
+    // Process counts (cached, polled in background)
+    let claude_count = state.claude_process_count;
     let zellij_count = state.sessions.sessions.len();
 
     // Build lines: logo on left, status on right

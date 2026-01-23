@@ -5,8 +5,8 @@ use tokio::sync::mpsc;
 
 use crate::external::{
     BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader, LinearClient, LinearIssue,
-    LinearIssueStatus, WorktreeInfo, ZellijSession, attach_zellij_foreground, edit_markdown,
-    get_pr_for_branch, launch_zellij_claude_in_worktree,
+    LinearIssueStatus, WorktreeInfo, ZellijSession, attach_zellij_foreground,
+    count_claude_processes, edit_markdown, get_pr_for_branch, launch_zellij_claude_in_worktree,
     launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
@@ -24,6 +24,7 @@ type SessionResult = Result<Vec<ZellijSession>, String>;
 type BranchPrResult = (String, Option<BranchPrInfo>);
 type LinearResult = Result<Vec<LinearIssue>, String>;
 type LinearStatusResult = Result<Vec<LinearIssueStatus>, String>;
+type ClaudeCountResult = usize;
 
 pub struct App {
     state: AppState,
@@ -49,6 +50,10 @@ pub struct App {
     linear_status_receiver: mpsc::Receiver<LinearStatusResult>,
     #[allow(dead_code)] // Sender kept to prevent channel closure
     linear_status_sender: mpsc::Sender<LinearStatusResult>,
+    // Claude process count channel
+    claude_count_receiver: mpsc::Receiver<ClaudeCountResult>,
+    claude_count_sender: mpsc::Sender<ClaudeCountResult>,
+    last_claude_count_poll: std::time::Instant,
 }
 
 impl App {
@@ -77,6 +82,7 @@ impl App {
         let (pr_info_sender, pr_info_receiver) = mpsc::channel(32);
         let (linear_sender, linear_receiver) = mpsc::channel(4);
         let (linear_status_sender, linear_status_receiver) = mpsc::channel(4);
+        let (claude_count_sender, claude_count_receiver) = mpsc::channel(4);
 
         // Mark as loading immediately so UI shows loading state
         state.worktrees.loading = true;
@@ -94,6 +100,13 @@ impl App {
         tokio::task::spawn_blocking(move || {
             let result = list_sessions_with_status().map_err(|e| e.to_string());
             let _ = sess_sender.blocking_send(result);
+        });
+
+        // Spawn immediate background load for Claude process count
+        let cc_sender = claude_count_sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let count = count_claude_processes();
+            let _ = cc_sender.blocking_send(count);
         });
 
         // Spawn initial Linear fetch if API key is available
@@ -185,6 +198,9 @@ impl App {
             linear_sender,
             linear_status_receiver,
             linear_status_sender,
+            claude_count_receiver,
+            claude_count_sender,
+            last_claude_count_poll: std::time::Instant::now(),
         })
     }
 
@@ -197,6 +213,8 @@ impl App {
         const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
         // Poll Claude activity every 500ms for responsive status updates
         const ACTIVITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+        // Poll Claude process count every 5 seconds
+        const CLAUDE_COUNT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
         loop {
             // Check for background load results (worktrees, sessions, PRs)
@@ -218,6 +236,12 @@ impl App {
             if self.last_activity_poll.elapsed() >= ACTIVITY_POLL_INTERVAL {
                 self.poll_claude_activity();
                 self.last_activity_poll = std::time::Instant::now();
+            }
+
+            // Poll Claude process count periodically
+            if self.last_claude_count_poll.elapsed() >= CLAUDE_COUNT_POLL_INTERVAL {
+                self.poll_claude_count_async();
+                self.last_claude_count_poll = std::time::Instant::now();
             }
 
             // Tick animation for spinners
@@ -334,6 +358,11 @@ impl App {
                     tracing::error!("Linear status fetch error: {}", e);
                 }
             }
+        }
+
+        // Non-blocking check for Claude process count results
+        while let Ok(count) = self.claude_count_receiver.try_recv() {
+            self.state.claude_process_count = count;
         }
     }
 
@@ -1086,6 +1115,14 @@ impl App {
         // Update Claude activity state for all sessions
         self.claude_activity_tracker
             .update_sessions(&mut self.state.sessions.sessions);
+    }
+
+    fn poll_claude_count_async(&self) {
+        let sender = self.claude_count_sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let count = count_claude_processes();
+            let _ = sender.blocking_send(count);
+        });
     }
 
     /// Get the project directory (current working directory)

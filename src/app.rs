@@ -179,14 +179,17 @@ impl App {
             }
         }
 
+        // Use a time in the past to trigger immediate polling on startup
+        let startup_instant = std::time::Instant::now() - std::time::Duration::from_secs(10);
+
         Ok(Self {
             state,
             storage,
             events: EventStream::new(),
-            last_session_poll: std::time::Instant::now(),
+            last_session_poll: startup_instant,
             last_animation_tick: std::time::Instant::now(),
-            last_pr_poll: std::time::Instant::now(),
-            last_activity_poll: std::time::Instant::now(),
+            last_pr_poll: startup_instant,
+            last_activity_poll: startup_instant,
             claude_activity_tracker: ClaudeActivityTracker::new(),
             plan_reader: ClaudePlanReader::new(),
             worktree_receiver,

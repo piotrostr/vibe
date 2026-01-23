@@ -4,6 +4,31 @@ use anyhow::Result;
 use std::path::Path;
 use std::process::Command;
 
+/// Strip ANSI escape sequences from a string
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip escape sequence: ESC [ ... letter
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                // Skip until we hit a letter (the terminator)
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if next.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClaudeActivityState {
     #[default]
@@ -40,13 +65,16 @@ pub fn list_sessions() -> Result<Vec<ZellijSession>> {
         .lines()
         .filter(|line| !line.is_empty())
         .map(|line| {
+            // Strip ANSI color codes first
+            let clean_line = strip_ansi(line);
+
             // Format: "session-name [Created 3m 5s ago] (current)"
             // Or dead: "session-name [Created 3m 5s ago] (EXITED -9attach to resurrect)"
-            let is_current = line.contains("(current)");
-            let is_dead = line.contains("EXITED");
+            let is_current = clean_line.contains("(current)");
+            let is_dead = clean_line.contains("EXITED");
 
             // Extract session name: everything before first '[' or space with metadata
-            let name = line.split('[').next().unwrap_or("").trim().to_string();
+            let name = clean_line.split('[').next().unwrap_or("").trim().to_string();
 
             ZellijSession {
                 name,
@@ -212,4 +240,39 @@ pub fn is_zellij_installed() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_ansi() {
+        // Typical zellij output: ^[[32;1msession-name^[[m [Created ...]
+        let input = "\x1b[32;1mtmux-detach-test\x1b[m [Created \x1b[35;1m2days\x1b[m ago] (\x1b[31;1mEXITED\x1b[m)";
+        let stripped = strip_ansi(input);
+        assert_eq!(stripped, "tmux-detach-test [Created 2days ago] (EXITED)");
+    }
+
+    #[test]
+    fn test_strip_ansi_no_codes() {
+        let input = "plain-session [Created 5m ago]";
+        assert_eq!(strip_ansi(input), input);
+    }
+
+    #[test]
+    fn test_session_name_parsing() {
+        let line = "\x1b[32;1mmy-feature-branch\x1b[m [Created \x1b[35;1m1h\x1b[m ago] (current)";
+        let clean = strip_ansi(line);
+        let name = clean.split('[').next().unwrap_or("").trim();
+        assert_eq!(name, "my-feature-branch");
+    }
+
+    #[test]
+    fn test_sanitize_session_name_truncation() {
+        let branch = "close-a-claude-code-session-or-zellij-session";
+        let sanitized = sanitize_session_name(branch);
+        assert!(sanitized.len() <= 36);
+        assert_eq!(sanitized, "close-a-claude-code-session-or-zelli");
+    }
 }

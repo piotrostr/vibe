@@ -289,18 +289,24 @@ impl App {
         }
 
         // Non-blocking check for session results
+        let mut sessions_updated = false;
         while let Ok(result) = self.session_receiver.try_recv() {
             match result {
                 Ok(sessions) => {
                     self.state.sessions.set_sessions(sessions);
                     self.state.sessions.loading = false;
                     self.state.sessions.error = None;
+                    sessions_updated = true;
                 }
                 Err(e) => {
                     self.state.sessions.error = Some(e);
                     self.state.sessions.loading = false;
                 }
             }
+        }
+        // Update activity state immediately after sessions refresh
+        if sessions_updated {
+            self.poll_claude_activity();
         }
 
         // Non-blocking check for PR info results

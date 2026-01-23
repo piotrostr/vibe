@@ -16,8 +16,15 @@ impl SessionsState {
         }
     }
 
-    pub fn set_sessions(&mut self, sessions: Vec<ZellijSession>) {
-        self.sessions = sessions;
+    pub fn set_sessions(&mut self, mut new_sessions: Vec<ZellijSession>) {
+        // Preserve activity state and context percentage from existing sessions
+        for new_session in &mut new_sessions {
+            if let Some(existing) = self.sessions.iter().find(|s| s.name == new_session.name) {
+                new_session.claude_activity = existing.claude_activity;
+                new_session.context_percentage = existing.context_percentage;
+            }
+        }
+        self.sessions = new_sessions;
         self.error = None;
     }
 

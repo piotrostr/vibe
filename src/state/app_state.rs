@@ -63,6 +63,9 @@ pub struct AppState {
     /// Vim-like command mode input (e.g., ";f" for search)
     /// None means not in command mode, Some(s) means currently typing command
     pub command_input: Option<String>,
+
+    /// Cached count of running Claude processes (polled in background)
+    pub claude_process_count: usize,
 }
 
 impl AppState {
@@ -99,6 +102,8 @@ impl AppState {
             logs_overlay_visible: false,
 
             command_input: None,
+
+            claude_process_count: 0,
         }
     }
 

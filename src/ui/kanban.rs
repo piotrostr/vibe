@@ -240,8 +240,7 @@ fn render_row(
             Style::default()
                 .bg(Color::DarkGray)
                 .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
+        );
 
     let mut list_state = ListState::default();
     if is_selected && !tasks.is_empty() {

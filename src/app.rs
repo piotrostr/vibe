@@ -106,7 +106,16 @@ impl App {
         state.claude_process_count = count_active_sessions();
 
         // Create activity file watcher for instant activity detection
-        let activity_watcher = ActivityWatcher::new(activity_sender).ok();
+        let activity_watcher = match ActivityWatcher::new(activity_sender) {
+            Ok(watcher) => {
+                tracing::info!("Activity file watcher started successfully");
+                Some(watcher)
+            }
+            Err(e) => {
+                tracing::error!("Failed to create activity watcher: {}", e);
+                None
+            }
+        };
 
         // Spawn initial Linear fetch if API key is available
         if state.linear_api_key_available {
@@ -209,8 +218,8 @@ impl App {
         const SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
         // Poll PR status every 30 seconds
         const PR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-        // Tick animation every 250ms for smooth spinner
-        const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+        // Tick animation every 150ms for snappy spinner
+        const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 
         loop {
             // Check for background load results (worktrees, sessions, PRs)
@@ -353,7 +362,10 @@ impl App {
         // Non-blocking check for activity file changes (event-driven)
         let mut activity_changed = false;
         while let Ok(path) = self.activity_receiver.try_recv() {
-            self.claude_activity_tracker.update_from_file(&path);
+            tracing::debug!("Activity file changed: {:?}", path);
+            if let Some(result) = self.claude_activity_tracker.update_from_file(&path) {
+                tracing::debug!("Activity state: {:?}, context: {:?}", result.state, result.context_percentage);
+            }
             activity_changed = true;
         }
         if activity_changed {
@@ -361,6 +373,7 @@ impl App {
             self.claude_activity_tracker
                 .update_sessions(&mut self.state.sessions.sessions);
             self.state.claude_process_count = count_active_sessions();
+            tracing::debug!("Updated {} sessions", self.state.sessions.sessions.len());
         }
     }
 

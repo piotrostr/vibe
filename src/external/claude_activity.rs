@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use super::ClaudeActivityState;
 
 // Thresholds for activity detection based on file change events
-const THINKING_THRESHOLD_SECS: u64 = 5; // Got update within this time = actively working
+const THINKING_THRESHOLD_SECS: u64 = 2; // Got update within this time = actively working
 const WAITING_THRESHOLD_SECS: u64 = 120; // No updates for this long = waiting for user
 
 #[derive(Debug, Deserialize)]

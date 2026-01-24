@@ -21,6 +21,7 @@ pub enum Action {
     LaunchSession,
     LaunchSessionPlan,
     ViewPR,
+    ViewPlan,
     BindPR,
 
     StartSearch,

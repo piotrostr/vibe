@@ -194,14 +194,14 @@ fn render_row(
                                 spans.push(Span::styled(
                                     format!(" [{}]", spinner_char),
                                     Style::default()
-                                        .fg(Color::Yellow)
+                                        .fg(Color::Blue)
                                         .add_modifier(Modifier::BOLD),
                                 ));
                             }
                             ClaudeActivityState::WaitingForUser => {
                                 spans.push(Span::styled(
-                                    " [!]",
-                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                                    " [?]",
+                                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                                 ));
                             }
                             ClaudeActivityState::Unknown if session.needs_attention => {

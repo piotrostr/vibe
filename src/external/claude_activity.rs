@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -10,31 +10,26 @@ use tokio::sync::mpsc;
 
 use super::ClaudeActivityState;
 
-// Thresholds for activity detection
-// Claude statusline updates on events, not continuously, so use generous thresholds
-const WAITING_THRESHOLD_SECS: u64 = 30; // Recent activity, waiting for user
-const IDLE_THRESHOLD_SECS: u64 = 300; // 5 minutes - no updates for this long = idle
+// Thresholds for activity detection based on file change events
+const THINKING_THRESHOLD_SECS: u64 = 5; // Got update within this time = actively working
+const WAITING_THRESHOLD_SECS: u64 = 120; // No updates for this long = waiting for user
 
 #[derive(Debug, Deserialize)]
 struct ClaudeStatusFile {
     working_dir: String,
     #[serde(default)]
-    #[allow(dead_code)] // Captured for future correlation
+    #[allow(dead_code)]
     session_id: Option<String>,
-    #[allow(dead_code)] // Kept for debugging
+    #[allow(dead_code)]
     input_tokens: Option<u64>,
+    #[allow(dead_code)]
     output_tokens: Option<u64>,
     #[serde(default)]
     used_percentage: Option<f64>,
     #[serde(default)]
+    #[allow(dead_code)]
     api_duration_ms: Option<u64>,
     timestamp: u64,
-}
-
-#[derive(Debug, Clone)]
-struct ActivitySnapshot {
-    api_duration_ms: Option<u64>,
-    output_tokens: Option<u64>,
 }
 
 /// Result of activity detection, includes state and context usage
@@ -46,7 +41,8 @@ pub struct ActivityResult {
 
 pub struct ClaudeActivityTracker {
     state_dir: PathBuf,
-    previous_snapshots: HashMap<String, ActivitySnapshot>,
+    /// Track when we last received a file change event for each working_dir
+    last_update_times: HashMap<String, Instant>,
 }
 
 impl ClaudeActivityTracker {
@@ -57,8 +53,14 @@ impl ClaudeActivityTracker {
 
         Self {
             state_dir,
-            previous_snapshots: HashMap::new(),
+            last_update_times: HashMap::new(),
         }
+    }
+
+    /// Record that we received a file change event for a working directory
+    pub fn record_update(&mut self, working_dir: &str) {
+        self.last_update_times
+            .insert(working_dir.to_string(), Instant::now());
     }
 
     pub fn get_activity_for_session(&mut self, session_name: &str) -> ActivityResult {
@@ -108,66 +110,34 @@ impl ClaudeActivityTracker {
     }
 
     fn determine_state(&mut self, status: &ClaudeStatusFile) -> ActivityResult {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        // Check how long since we last received a file change event for this session
+        let state = if let Some(last_update) = self.last_update_times.get(&status.working_dir) {
+            let elapsed = last_update.elapsed().as_secs();
 
-        let age_secs = now.saturating_sub(status.timestamp);
-
-        // Check if status is stale (>30s old) - definitely idle
-        if age_secs > IDLE_THRESHOLD_SECS {
-            return ActivityResult {
-                state: ClaudeActivityState::Idle,
-                context_percentage: status.used_percentage,
-            };
-        }
-
-        let current_snapshot = ActivitySnapshot {
-            api_duration_ms: status.api_duration_ms,
-            output_tokens: status.output_tokens,
-        };
-
-        // Check against previous snapshot
-        let state = if let Some(prev) = self.previous_snapshots.get(&status.working_dir) {
-            // Primary signal: api_duration_ms increasing means Claude is making API calls
-            let api_duration_changed = match (prev.api_duration_ms, current_snapshot.api_duration_ms)
-            {
-                (Some(prev_dur), Some(curr_dur)) => curr_dur > prev_dur,
-                (None, Some(_)) => true, // Started making calls
-                _ => false,
-            };
-
-            // Secondary signal: output tokens increasing
-            let tokens_changed = match (prev.output_tokens, current_snapshot.output_tokens) {
-                (Some(prev_tok), Some(curr_tok)) => curr_tok > prev_tok,
-                (None, Some(_)) => true,
-                _ => false,
-            };
-
-            if api_duration_changed || tokens_changed {
-                // Actively working
+            if elapsed < THINKING_THRESHOLD_SECS {
+                // Got a file update very recently - Claude is actively working
                 ClaudeActivityState::Thinking
-            } else if age_secs < WAITING_THRESHOLD_SECS {
-                // Recent activity but stable - waiting for user
+            } else if elapsed < WAITING_THRESHOLD_SECS {
+                // Haven't seen updates in a bit - waiting for user
                 ClaudeActivityState::WaitingForUser
             } else {
-                // Stable for a while, getting stale
+                // No updates for a long time - idle
                 ClaudeActivityState::Idle
             }
         } else {
-            // First time seeing this session
+            // No record of updates - check file timestamp as fallback
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let age_secs = now.saturating_sub(status.timestamp);
+
             if age_secs < WAITING_THRESHOLD_SECS {
-                // Fresh data, assume waiting for user (just started or just finished)
                 ClaudeActivityState::WaitingForUser
             } else {
                 ClaudeActivityState::Idle
             }
         };
-
-        // Update snapshot
-        self.previous_snapshots
-            .insert(status.working_dir.clone(), current_snapshot);
 
         ActivityResult {
             state,
@@ -187,6 +157,8 @@ impl ClaudeActivityTracker {
     pub fn update_from_file(&mut self, path: &Path) -> Option<ActivityResult> {
         let content = fs::read_to_string(path).ok()?;
         let status: ClaudeStatusFile = serde_json::from_str(&content).ok()?;
+        // Record that we just received an update for this working directory
+        self.record_update(&status.working_dir);
         Some(self.determine_state(&status))
     }
 }
@@ -362,15 +334,17 @@ mod tests {
     }
 
     #[test]
-    fn test_activity_state_thinking_api_duration_increasing() {
+    fn test_activity_state_thinking_recent_update() {
         let mut tracker = ClaudeActivityTracker::new();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        // First snapshot
-        let status1 = ClaudeStatusFile {
+        // Record a recent update
+        tracker.record_update("/test/project");
+
+        let status = ClaudeStatusFile {
             working_dir: "/test/project".to_string(),
             session_id: Some("test-session".to_string()),
             input_tokens: Some(100),
@@ -379,34 +353,26 @@ mod tests {
             api_duration_ms: Some(1000),
             timestamp: now,
         };
-        let result1 = tracker.determine_state(&status1);
-        // First time seeing - should be WaitingForUser since fresh
-        assert_eq!(result1.state, ClaudeActivityState::WaitingForUser);
-
-        // Second snapshot with increased api_duration_ms
-        let status2 = ClaudeStatusFile {
-            working_dir: "/test/project".to_string(),
-            session_id: Some("test-session".to_string()),
-            input_tokens: Some(100),
-            output_tokens: Some(50),
-            used_percentage: Some(10.0),
-            api_duration_ms: Some(2000), // Increased!
-            timestamp: now,
-        };
-        let result2 = tracker.determine_state(&status2);
-        assert_eq!(result2.state, ClaudeActivityState::Thinking);
+        let result = tracker.determine_state(&status);
+        // Just received an update - should be Thinking
+        assert_eq!(result.state, ClaudeActivityState::Thinking);
     }
 
     #[test]
-    fn test_activity_state_waiting_stable() {
+    fn test_activity_state_waiting_no_recent_update() {
         let mut tracker = ClaudeActivityTracker::new();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        // First snapshot
-        let status1 = ClaudeStatusFile {
+        // Record an update from 10 seconds ago (simulated by inserting old instant)
+        tracker.last_update_times.insert(
+            "/test/project".to_string(),
+            Instant::now() - std::time::Duration::from_secs(10),
+        );
+
+        let status = ClaudeStatusFile {
             working_dir: "/test/project".to_string(),
             session_id: None,
             input_tokens: Some(100),
@@ -415,31 +381,20 @@ mod tests {
             api_duration_ms: Some(1000),
             timestamp: now,
         };
-        tracker.determine_state(&status1);
-
-        // Second snapshot - same values, recent timestamp
-        let status2 = ClaudeStatusFile {
-            working_dir: "/test/project".to_string(),
-            session_id: None,
-            input_tokens: Some(100),
-            output_tokens: Some(50),
-            used_percentage: Some(10.0),
-            api_duration_ms: Some(1000), // Same
-            timestamp: now,
-        };
-        let result = tracker.determine_state(&status2);
+        let result = tracker.determine_state(&status);
+        // No recent updates - should be WaitingForUser
         assert_eq!(result.state, ClaudeActivityState::WaitingForUser);
     }
 
     #[test]
-    fn test_activity_state_idle_stale() {
+    fn test_activity_state_idle_no_updates() {
         let mut tracker = ClaudeActivityTracker::new();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
-        // Stale timestamp (>5 minutes old)
+        // No update recorded, and stale timestamp
         let status = ClaudeStatusFile {
             working_dir: "/test/project".to_string(),
             session_id: None,
@@ -450,6 +405,7 @@ mod tests {
             timestamp: now - 600, // 10 minutes ago
         };
         let result = tracker.determine_state(&status);
+        // No updates tracked and old timestamp - should be Idle
         assert_eq!(result.state, ClaudeActivityState::Idle);
     }
 

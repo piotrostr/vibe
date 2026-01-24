@@ -153,31 +153,85 @@ Reference documentation: https://github.com/piotrostr/vibe/blob/main/README.md
     [ -n "$branch" ] && printf '\033[33mgit:\033[31m%s\033[0m' "$branch"
     ```
 
-11. **Make statusline executable**: `chmod +x ~/.vibe/claude-statusline.sh`
+11. **Write Claude thinking-start hook** to `~/.vibe/claude-thinking-start.sh`:
+    ```bash
+    #!/bin/bash
+    STATE_DIR="$HOME/.vibe/claude-activity"
+    input=$(cat)
+    working_dir=$(echo "$input" | jq -r '.cwd // empty')
 
-12. **Configure Claude Code statusline** - update `~/.claude/settings.json` to include:
+    if [ -n "$working_dir" ]; then
+        dir_hash=$(echo -n "$working_dir" | md5sum 2>/dev/null | cut -c1-16 || echo -n "$working_dir" | md5 | cut -c1-16)
+        mkdir -p "$STATE_DIR"
+        touch "$STATE_DIR/$dir_hash.thinking"
+    fi
+    ```
+
+12. **Write Claude thinking-stop hook** to `~/.vibe/claude-thinking-stop.sh`:
+    ```bash
+    #!/bin/bash
+    STATE_DIR="$HOME/.vibe/claude-activity"
+    input=$(cat)
+    working_dir=$(echo "$input" | jq -r '.cwd // empty')
+
+    if [ -n "$working_dir" ]; then
+        dir_hash=$(echo -n "$working_dir" | md5sum 2>/dev/null | cut -c1-16 || echo -n "$working_dir" | md5 | cut -c1-16)
+        rm -f "$STATE_DIR/$dir_hash.thinking"
+    fi
+    ```
+
+13. **Make all scripts executable**:
+    ```bash
+    chmod +x ~/.vibe/claude-statusline.sh
+    chmod +x ~/.vibe/claude-thinking-start.sh
+    chmod +x ~/.vibe/claude-thinking-stop.sh
+    ```
+
+14. **Configure Claude Code** - update `~/.claude/settings.json` to include:
     ```json
     {
       "statusLine": {
         "type": "command",
         "command": "~/.vibe/claude-statusline.sh"
+      },
+      "hooks": {
+        "UserPromptSubmit": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "~/.vibe/claude-thinking-start.sh"
+              }
+            ]
+          }
+        ],
+        "Stop": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "~/.vibe/claude-thinking-stop.sh"
+              }
+            ]
+          }
+        ]
       }
     }
     ```
-    If the file exists, merge the statusLine config. If it doesn't exist, create it.
+    If the file exists, merge the statusLine and hooks config. If it doesn't exist, create it.
 
-13. **Adjust for Linux** if detected:
+15. **Adjust for Linux** if detected:
     - Change `copy_command` in Zellij config from `"pbcopy"` to `"xclip -selection clipboard"` or `"wl-copy"` (Wayland)
-    - Use `md5sum` instead of `md5` in the statusline script (already handled above)
+    - The scripts above already handle `md5sum` vs `md5` differences
 
-14. **Verify installation** by running:
+16. **Verify installation** by running:
     - `which vibe` - should show the installed binary
     - `which wt` - should show worktrunk
     - `which zellij` - should show zellij
     - `zellij --version` - should work
-    - `~/.vibe/claude-statusline.sh` with mock input - should not error
 
-15. **Print success message** with quick start instructions:
+17. **Print success message** with quick start instructions:
     - Run `vibe` in any git repository to start
     - Press `c` to create a task, `g` to launch a Claude session
     - Press `?` for help
+    - Activity indicators: spinning star = thinking, [?] = waiting for input

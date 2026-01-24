@@ -211,9 +211,11 @@ Key bindings (tmux-like with `Ctrl+b` prefix):
 
 ### Claude Activity Indication
 
-For real-time Claude session status indicators (thinking/waiting/idle) and context window usage, configure Claude Code's statusline:
+For real-time Claude session status indicators (thinking/waiting/idle) and context window usage, configure Claude Code's statusline and hooks.
 
-1. Create `~/.vibe/claude-statusline.sh`:
+#### 1. Statusline Script (context window usage)
+
+Create `~/.vibe/claude-statusline.sh`:
 
 ```bash
 #!/bin/bash
@@ -241,23 +243,87 @@ branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
 [ -n "$branch" ] && printf '\033[33mgit:\033[31m%s\033[0m' "$branch"
 ```
 
-2. Make executable: `chmod +x ~/.vibe/claude-statusline.sh`
+#### 2. Thinking Detection Hooks (instant spinner)
 
-3. Add to `~/.claude/settings.json`:
+For instant thinking detection (spinner appears the moment you send a message), create two hook scripts:
+
+**`~/.vibe/claude-thinking-start.sh`** - fires when you submit a prompt:
+
+```bash
+#!/bin/bash
+STATE_DIR="$HOME/.vibe/claude-activity"
+input=$(cat)
+working_dir=$(echo "$input" | jq -r '.cwd // empty')
+
+if [ -n "$working_dir" ]; then
+    dir_hash=$(echo -n "$working_dir" | md5 | cut -c1-16)
+    mkdir -p "$STATE_DIR"
+    touch "$STATE_DIR/$dir_hash.thinking"
+fi
+```
+
+**`~/.vibe/claude-thinking-stop.sh`** - fires when Claude finishes responding:
+
+```bash
+#!/bin/bash
+STATE_DIR="$HOME/.vibe/claude-activity"
+input=$(cat)
+working_dir=$(echo "$input" | jq -r '.cwd // empty')
+
+if [ -n "$working_dir" ]; then
+    dir_hash=$(echo -n "$working_dir" | md5 | cut -c1-16)
+    rm -f "$STATE_DIR/$dir_hash.thinking"
+fi
+```
+
+#### 3. Make Scripts Executable
+
+```bash
+chmod +x ~/.vibe/claude-statusline.sh
+chmod +x ~/.vibe/claude-thinking-start.sh
+chmod +x ~/.vibe/claude-thinking-stop.sh
+```
+
+#### 4. Configure Claude Code
+
+Add to `~/.claude/settings.json`:
 
 ```json
 {
   "statusLine": {
     "type": "command",
     "command": "~/.vibe/claude-statusline.sh"
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.vibe/claude-thinking-start.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.vibe/claude-thinking-stop.sh"
+          }
+        ]
+      }
+    ]
   }
 }
 ```
 
-Activity indicators in vibe:
-- Spinner (yellow) - Claude is actively thinking (API calls in progress)
-- `[!]` (red) - Claude is waiting for user input
-- `[-]` (gray) - Session idle (no activity for 30+ seconds)
+#### Activity Indicators
+
+- `[*]` (blue, animated) - Claude is actively thinking
+- `[?]` (yellow) - Claude is waiting for user input
+- No indicator - Session idle
 - `25%` (gray/yellow/red) - Context window usage (red when >90%)
 
 ## License

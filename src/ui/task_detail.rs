@@ -8,7 +8,14 @@ use ratatui::{
 
 use crate::state::Task;
 
-pub fn render_task_detail(frame: &mut Frame, area: Rect, task: &Task, plan: Option<&str>) {
+pub fn render_task_detail(
+    frame: &mut Frame,
+    area: Rect,
+    task: &Task,
+    plan: Option<&str>,
+    plan_scroll_offset: usize,
+    plan_line_count: usize,
+) {
     let has_linear = task.linear_url.is_some() || task.linear_issue_id.is_some();
     let has_pr = task.pr_url.is_some();
     let has_plan = plan.is_some();
@@ -109,17 +116,36 @@ pub fn render_task_detail(frame: &mut Frame, area: Rect, task: &Task, plan: Opti
         chunk_idx += 1;
     }
 
-    // Plan section
+    // Plan section with scrolling
     if let Some(plan_content) = plan {
-        let plan_widget = Paragraph::new(plan_content)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Claude Plan ")
-                    .border_style(Style::default().fg(Color::Magenta)),
-            );
-        frame.render_widget(plan_widget, chunks[chunk_idx]);
+        // Calculate visible area height (minus borders)
+        let plan_area = chunks[chunk_idx];
+        let visible_height = plan_area.height.saturating_sub(2) as usize;
+
+        // Get lines with offset for scrolling
+        let lines: Vec<&str> = plan_content.lines().collect();
+        let visible_lines: Vec<Line> = lines
+            .iter()
+            .skip(plan_scroll_offset)
+            .take(visible_height)
+            .map(|l| Line::from(*l))
+            .collect();
+
+        // Build title with scroll position
+        let title = if plan_line_count > visible_height {
+            let current_pos = plan_scroll_offset + 1;
+            format!(" Plan [{}/{}] ", current_pos, plan_line_count)
+        } else {
+            " Plan ".to_string()
+        };
+
+        let plan_widget = Paragraph::new(visible_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::Magenta)),
+        );
+        frame.render_widget(plan_widget, plan_area);
         chunk_idx += 1;
     }
 
@@ -143,6 +169,8 @@ pub fn render_task_detail_with_actions(
     area: Rect,
     task: &Task,
     plan: Option<&str>,
+    plan_scroll_offset: usize,
+    plan_line_count: usize,
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -152,7 +180,14 @@ pub fn render_task_detail_with_actions(
         ])
         .split(area);
 
-    render_task_detail(frame, chunks[0], task, plan);
+    render_task_detail(
+        frame,
+        chunks[0],
+        task,
+        plan,
+        plan_scroll_offset,
+        plan_line_count,
+    );
 
     // Actions bar
     let actions = Paragraph::new(Line::from(vec![
@@ -160,14 +195,14 @@ pub fn render_task_detail_with_actions(
         Span::raw(" Gas it  "),
         Span::styled("[p]", Style::default().fg(Color::Cyan)),
         Span::raw(" Plan it  "),
-        Span::styled("[b]", Style::default().fg(Color::Cyan)),
-        Span::raw(" Bind PR  "),
+        Span::styled("[P]", Style::default().fg(Color::Cyan)),
+        Span::raw(" View Plan  "),
         Span::styled("[v]", Style::default().fg(Color::Cyan)),
         Span::raw(" View PR  "),
         Span::styled("[e]", Style::default().fg(Color::Cyan)),
         Span::raw(" Edit  "),
         Span::styled("[d]", Style::default().fg(Color::Cyan)),
-        Span::raw(" Delete  "),
+        Span::raw(" Delete"),
     ]))
     .block(
         Block::default()

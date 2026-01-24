@@ -33,6 +33,13 @@ pub fn edit_markdown(initial_content: &str) -> Result<Option<String>> {
     edit_in_editor(initial_content, "md")
 }
 
+/// Open a file in the editor for viewing (read-only viewing, user can scroll).
+pub fn view_file(path: &str) -> Result<()> {
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string());
+    Command::new(&editor).arg(path).status()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

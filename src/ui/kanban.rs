@@ -181,7 +181,10 @@ fn render_row(
 
             // Linear identifier
             if let Some(linear_id) = &task.linear_issue_id {
-                spans.push(Span::styled(format!(" {}", linear_id), Style::default().fg(Color::Blue)));
+                spans.push(Span::styled(
+                    format!(" {}", linear_id),
+                    Style::default().fg(Color::Blue),
+                ));
             }
 
             // Session indicators for tasks with worktrees (skip Done tasks)

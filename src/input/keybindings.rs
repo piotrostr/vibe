@@ -170,18 +170,18 @@ fn kanban_bindings(key: KeyEvent) -> Option<Action> {
 }
 
 fn task_detail_bindings(key: KeyEvent) -> Option<Action> {
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
-        KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
-        KeyCode::Char('h') | KeyCode::Left => Some(Action::Back),
-        KeyCode::Char('e') => Some(Action::EditTask),
-        KeyCode::Char('g') => Some(Action::LaunchSession),
-        KeyCode::Char('p') => Some(Action::LaunchSessionPlan),
-        KeyCode::Char('v') => Some(Action::ViewPR),
-        KeyCode::Char('b') => Some(Action::BindPR),
-        KeyCode::Char('r') => Some(Action::Refresh),
-        KeyCode::Enter | KeyCode::Char(' ') => Some(Action::LaunchSession),
-        KeyCode::Char('w') => Some(Action::ShowWorktrees),
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('j') | KeyCode::Down, _) => Some(Action::Down),
+        (KeyCode::Char('k') | KeyCode::Up, _) => Some(Action::Up),
+        (KeyCode::Char('h') | KeyCode::Left, _) => Some(Action::Back),
+        (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Action::EditTask),
+        (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Action::LaunchSession),
+        (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Action::LaunchSessionPlan),
+        (KeyCode::Char('P'), KeyModifiers::SHIFT) => Some(Action::ViewPlan),
+        (KeyCode::Char('v'), KeyModifiers::NONE) => Some(Action::ViewPR),
+        (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Action::Refresh),
+        (KeyCode::Enter | KeyCode::Char(' '), _) => Some(Action::LaunchSession),
+        (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Action::ShowWorktrees),
         _ => None,
     }
 }

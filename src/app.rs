@@ -25,6 +25,7 @@ type SessionResult = Result<Vec<ZellijSession>, String>;
 type BranchPrResult = (String, Option<BranchPrInfo>);
 type LinearResult = Result<Vec<LinearIssue>, String>;
 type LinearStatusResult = Result<Vec<LinearIssueStatus>, String>;
+type PlanPresenceResult = (String, bool); // (task_id, has_plan)
 
 pub struct App {
     state: AppState,
@@ -53,6 +54,9 @@ pub struct App {
     activity_receiver: mpsc::Receiver<PathBuf>,
     #[allow(dead_code)] // Watcher must stay alive
     _activity_watcher: Option<ActivityWatcher>,
+    // Plan presence channel
+    plan_presence_receiver: mpsc::Receiver<PlanPresenceResult>,
+    plan_presence_sender: mpsc::Sender<PlanPresenceResult>,
 }
 
 impl App {
@@ -82,6 +86,7 @@ impl App {
         let (linear_sender, linear_receiver) = mpsc::channel(4);
         let (linear_status_sender, linear_status_receiver) = mpsc::channel(4);
         let (activity_sender, activity_receiver) = mpsc::channel(32);
+        let (plan_presence_sender, plan_presence_receiver) = mpsc::channel(64);
 
         // Mark as loading immediately so UI shows loading state
         state.worktrees.loading = true;
@@ -209,6 +214,8 @@ impl App {
             linear_status_sender,
             activity_receiver,
             _activity_watcher: activity_watcher,
+            plan_presence_receiver,
+            plan_presence_sender,
         })
     }
 
@@ -268,6 +275,8 @@ impl App {
                     self.state.worktrees.set_worktrees(worktrees);
                     self.state.worktrees.loading = false;
                     self.state.worktrees.error = None;
+                    // Check plan presence now that we have worktree paths
+                    self.poll_plan_presence();
                 }
                 Err(e) => {
                     self.state.worktrees.error = Some(e);
@@ -378,6 +387,15 @@ impl App {
             self.state.claude_process_count = count_active_sessions();
             tracing::debug!("Updated {} sessions", self.state.sessions.sessions.len());
         }
+
+        // Non-blocking check for plan presence results
+        while let Ok((task_id, has_plan)) = self.plan_presence_receiver.try_recv() {
+            if has_plan {
+                self.state.tasks_with_plans.insert(task_id);
+            } else {
+                self.state.tasks_with_plans.remove(&task_id);
+            }
+        }
     }
 
     fn fetch_pr_info_for_branches(&self, worktrees: &[WorktreeInfo]) {
@@ -438,6 +456,8 @@ impl App {
                             chunks[1],
                             task,
                             self.state.selected_task_plan.as_deref(),
+                            self.state.plan_scroll_offset,
+                            self.state.plan_line_count,
                         );
                     }
                 }
@@ -557,6 +577,9 @@ impl App {
             }
             Action::ViewPR => {
                 self.handle_view_pr()?;
+            }
+            Action::ViewPlan => {
+                self.handle_view_plan(terminal)?;
             }
             Action::BindPR => {
                 // PR binding not available in standalone mode
@@ -728,7 +751,9 @@ impl App {
                     &linear_statuses,
                 );
             }
-            View::TaskDetail => {}
+            View::TaskDetail => {
+                self.state.scroll_plan_up();
+            }
             View::Worktrees => {
                 self.state.worktrees.select_prev();
             }
@@ -760,7 +785,10 @@ impl App {
                     &linear_statuses,
                 );
             }
-            View::TaskDetail => {}
+            View::TaskDetail => {
+                // Use a reasonable default for visible lines; actual height is available during render
+                self.state.scroll_plan_down(20);
+            }
             View::Worktrees => {
                 self.state.worktrees.select_next();
             }
@@ -806,14 +834,42 @@ impl App {
 
     /// Load the Claude Code plan for a task based on its branch.
     fn load_plan_for_task(&mut self, task: &crate::state::Task) {
+        self.state.reset_plan_scroll();
+
         let branch = task_title_to_branch(&task.title, task.linear_issue_id.as_deref());
-        if let Some(project_dir) = self.get_project_dir() {
-            let project_path = project_dir.to_string_lossy().to_string();
+
+        // Find the worktree path for this task's branch
+        // Claude stores session data in ~/.claude/projects/{worktree-path}/, not the main project path
+        let project_path = self
+            .state
+            .worktrees
+            .worktrees
+            .iter()
+            .find(|w| {
+                w.branch == branch || w.branch.contains(&branch) || branch.contains(&w.branch)
+            })
+            .map(|w| w.path.clone())
+            .or_else(|| {
+                self.get_project_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+            });
+
+        if let Some(project_path) = project_path {
+            // Get both the plan path and content
+            self.state.selected_task_plan_path = self
+                .plan_reader
+                .find_plan_path_for_branch(&project_path, &branch);
+
             self.state.selected_task_plan = self
                 .plan_reader
                 .find_plan_for_branch(&project_path, &branch);
+
+            if let Some(ref plan) = self.state.selected_task_plan {
+                self.state.plan_line_count = plan.lines().count();
+            }
         } else {
             self.state.selected_task_plan = None;
+            self.state.selected_task_plan_path = None;
         }
     }
 
@@ -864,6 +920,8 @@ impl App {
                 self.state.tasks.set_tasks(tasks);
                 // Also refresh Linear pending issues
                 self.refresh_linear();
+                // Refresh plan presence
+                self.poll_plan_presence();
             }
             View::Worktrees => {
                 self.load_worktrees();
@@ -1077,6 +1135,42 @@ impl App {
             .update_sessions(&mut self.state.sessions.sessions);
     }
 
+    /// Check plan presence for all tasks using worktree paths
+    fn poll_plan_presence(&self) {
+        let tasks = self.state.tasks.tasks.clone();
+        let worktrees = self.state.worktrees.worktrees.clone();
+        let fallback_path = self
+            .get_project_dir()
+            .map(|p| p.to_string_lossy().to_string());
+
+        for task in tasks {
+            let sender = self.plan_presence_sender.clone();
+            let branch = task_title_to_branch(&task.title, task.linear_issue_id.as_deref());
+            let worktrees = worktrees.clone();
+            let fallback = fallback_path.clone();
+            let task_id = task.id.clone();
+
+            tokio::task::spawn_blocking(move || {
+                // Find the worktree path for this task's branch
+                let project_path = worktrees
+                    .iter()
+                    .find(|w| {
+                        w.branch == branch
+                            || w.branch.contains(&branch)
+                            || branch.contains(&w.branch)
+                    })
+                    .map(|w| w.path.clone())
+                    .or(fallback);
+
+                if let Some(project_path) = project_path {
+                    let reader = ClaudePlanReader::new();
+                    let has_plan = reader.has_plan_for_branch(&project_path, &branch);
+                    let _ = sender.blocking_send((task_id, has_plan));
+                }
+            });
+        }
+    }
+
     /// Get the project directory (current working directory)
     fn get_project_dir(&self) -> Option<std::path::PathBuf> {
         std::env::current_dir().ok()
@@ -1189,6 +1283,24 @@ impl App {
             } else {
                 tracing::warn!("No PR URL for this task");
             }
+        }
+        Ok(())
+    }
+
+    fn handle_view_plan(&self, terminal: &mut Terminal) -> Result<()> {
+        if let Some(plan_path) = &self.state.selected_task_plan_path {
+            // Suspend terminal to let editor take over
+            terminal.suspend()?;
+
+            // Open plan file in editor
+            if let Err(e) = crate::external::view_file(plan_path) {
+                tracing::error!("Failed to open plan in editor: {}", e);
+            }
+
+            // Resume terminal
+            terminal.resume()?;
+        } else {
+            tracing::warn!("No plan available for this task");
         }
         Ok(())
     }

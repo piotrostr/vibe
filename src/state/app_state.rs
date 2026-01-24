@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{LogsState, ProjectsState, SearchState, SessionsState, TasksState, WorktreesState};
 use crate::external::{LinearIssue, LinearIssueStatus};
@@ -35,6 +35,18 @@ pub struct AppState {
 
     /// Cached plan content for the currently selected task
     pub selected_task_plan: Option<String>,
+
+    /// Path to the plan file for the currently selected task
+    pub selected_task_plan_path: Option<String>,
+
+    /// Task IDs that have Claude plans available
+    pub tasks_with_plans: HashSet<String>,
+
+    /// Scroll offset for plan content in TaskDetail view
+    pub plan_scroll_offset: usize,
+
+    /// Total number of lines in the current plan
+    pub plan_line_count: usize,
 
     pub search_active: bool,
     pub search_query: String,
@@ -83,6 +95,10 @@ impl AppState {
             selected_project_id: None,
             selected_task_id: None,
             selected_task_plan: None,
+            selected_task_plan_path: None,
+            tasks_with_plans: HashSet::new(),
+            plan_scroll_offset: 0,
+            plan_line_count: 0,
 
             search_active: false,
             search_query: String::new(),
@@ -114,6 +130,27 @@ impl AppState {
         // Match Claude Code's spinner characters for authentic feel
         const SPINNER: [char; 4] = ['✽', '✶', '✢', '✳'];
         SPINNER[self.animation_frame as usize]
+    }
+
+    /// Reset plan scroll position when changing tasks
+    pub fn reset_plan_scroll(&mut self) {
+        self.plan_scroll_offset = 0;
+        self.plan_line_count = 0;
+    }
+
+    /// Scroll plan content up
+    pub fn scroll_plan_up(&mut self) {
+        self.plan_scroll_offset = self.plan_scroll_offset.saturating_sub(1);
+    }
+
+    /// Scroll plan content down, respecting bounds
+    pub fn scroll_plan_down(&mut self, visible_height: usize) {
+        if self.plan_line_count > visible_height {
+            let max_offset = self.plan_line_count.saturating_sub(visible_height);
+            if self.plan_scroll_offset < max_offset {
+                self.plan_scroll_offset += 1;
+            }
+        }
     }
 }
 

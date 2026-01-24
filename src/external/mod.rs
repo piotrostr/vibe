@@ -15,7 +15,7 @@ mod zellij;
 
 pub use claude_activity::{ActivityWatcher, ClaudeActivityTracker, count_active_sessions};
 pub use claude_plans::ClaudePlanReader;
-pub use editor::edit_markdown;
+pub use editor::{edit_markdown, view_file};
 pub use gh::*;
 pub use linear::{LinearClient, LinearIssue, LinearIssueStatus};
 pub use terminal_spawn::*;

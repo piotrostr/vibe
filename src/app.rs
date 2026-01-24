@@ -217,8 +217,8 @@ impl App {
         const SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
         // Poll PR status every 30 seconds
         const PR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-        // Tick animation every 150ms for snappy spinner
-        const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+        // Tick animation every 200ms for smooth spinner
+        const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
         loop {
             // Check for background load results (worktrees, sessions, PRs)

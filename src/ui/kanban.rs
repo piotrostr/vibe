@@ -213,7 +213,10 @@ fn render_row(
                             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                         ));
                     }
-                    // Idle and Unknown without attention - don't show indicator
+                    ClaudeActivityState::Idle => {
+                        spans.push(Span::styled(" ·", Style::default().fg(Color::DarkGray)));
+                    }
+                    // Unknown without attention - don't show indicator
                     _ => {}
                 }
 

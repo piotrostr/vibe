@@ -3,10 +3,12 @@ use crossterm::event::Event;
 use ratatui::layout::{Constraint, Direction, Layout};
 use tokio::sync::mpsc;
 
+use std::path::PathBuf;
+
 use crate::external::{
-    BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader, LinearClient, LinearIssue,
-    LinearIssueStatus, WorktreeInfo, ZellijSession, attach_zellij_foreground,
-    count_claude_processes, edit_markdown, get_pr_for_branch, launch_zellij_claude_in_worktree,
+    ActivityWatcher, BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader, LinearClient,
+    LinearIssue, LinearIssueStatus, WorktreeInfo, ZellijSession, count_active_sessions,
+    edit_markdown, get_pr_for_branch, launch_zellij_claude_in_worktree,
     launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
@@ -15,8 +17,7 @@ use crate::storage::TaskStorage;
 use crate::terminal::Terminal;
 use crate::ui::{
     render_footer, render_header, render_help_modal, render_kanban_board, render_logs,
-    render_logs_overlay, render_search, render_sessions, render_task_detail_with_actions,
-    render_worktrees,
+    render_logs_overlay, render_search, render_task_detail_with_actions, render_worktrees,
 };
 
 type WorktreeResult = Result<Vec<WorktreeInfo>, String>;
@@ -24,7 +25,6 @@ type SessionResult = Result<Vec<ZellijSession>, String>;
 type BranchPrResult = (String, Option<BranchPrInfo>);
 type LinearResult = Result<Vec<LinearIssue>, String>;
 type LinearStatusResult = Result<Vec<LinearIssueStatus>, String>;
-type ClaudeCountResult = usize;
 
 pub struct App {
     state: AppState,
@@ -33,7 +33,6 @@ pub struct App {
     last_session_poll: std::time::Instant,
     last_animation_tick: std::time::Instant,
     last_pr_poll: std::time::Instant,
-    last_activity_poll: std::time::Instant,
     claude_activity_tracker: ClaudeActivityTracker,
     plan_reader: ClaudePlanReader,
     // Background loading channels
@@ -50,10 +49,10 @@ pub struct App {
     linear_status_receiver: mpsc::Receiver<LinearStatusResult>,
     #[allow(dead_code)] // Sender kept to prevent channel closure
     linear_status_sender: mpsc::Sender<LinearStatusResult>,
-    // Claude process count channel
-    claude_count_receiver: mpsc::Receiver<ClaudeCountResult>,
-    claude_count_sender: mpsc::Sender<ClaudeCountResult>,
-    last_claude_count_poll: std::time::Instant,
+    // Activity file watcher (event-driven instead of polling)
+    activity_receiver: mpsc::Receiver<PathBuf>,
+    #[allow(dead_code)] // Watcher must stay alive
+    _activity_watcher: Option<ActivityWatcher>,
 }
 
 impl App {
@@ -82,7 +81,7 @@ impl App {
         let (pr_info_sender, pr_info_receiver) = mpsc::channel(32);
         let (linear_sender, linear_receiver) = mpsc::channel(4);
         let (linear_status_sender, linear_status_receiver) = mpsc::channel(4);
-        let (claude_count_sender, claude_count_receiver) = mpsc::channel(4);
+        let (activity_sender, activity_receiver) = mpsc::channel(32);
 
         // Mark as loading immediately so UI shows loading state
         state.worktrees.loading = true;
@@ -102,13 +101,20 @@ impl App {
             let _ = sess_sender.blocking_send(result);
         });
 
-        // Spawn immediate background load for Claude process count
-        state.claude_count_loading = true;
-        let cc_sender = claude_count_sender.clone();
-        tokio::task::spawn_blocking(move || {
-            let count = count_claude_processes();
-            let _ = cc_sender.blocking_send(count);
-        });
+        // Set initial Claude count from activity files (instant, no ps command)
+        state.claude_process_count = count_active_sessions();
+
+        // Create activity file watcher for instant activity detection
+        let activity_watcher = match ActivityWatcher::new(activity_sender) {
+            Ok(watcher) => {
+                tracing::info!("Activity file watcher started successfully");
+                Some(watcher)
+            }
+            Err(e) => {
+                tracing::error!("Failed to create activity watcher: {}", e);
+                None
+            }
+        };
 
         // Spawn initial Linear fetch if API key is available
         if state.linear_api_key_available {
@@ -179,14 +185,16 @@ impl App {
             }
         }
 
+        // Use a time in the past to trigger immediate polling on startup
+        let startup_instant = std::time::Instant::now() - std::time::Duration::from_secs(10);
+
         Ok(Self {
             state,
             storage,
             events: EventStream::new(),
-            last_session_poll: std::time::Instant::now(),
+            last_session_poll: startup_instant,
             last_animation_tick: std::time::Instant::now(),
-            last_pr_poll: std::time::Instant::now(),
-            last_activity_poll: std::time::Instant::now(),
+            last_pr_poll: startup_instant,
             claude_activity_tracker: ClaudeActivityTracker::new(),
             plan_reader: ClaudePlanReader::new(),
             worktree_receiver,
@@ -199,9 +207,8 @@ impl App {
             linear_sender,
             linear_status_receiver,
             linear_status_sender,
-            claude_count_receiver,
-            claude_count_sender,
-            last_claude_count_poll: std::time::Instant::now(),
+            activity_receiver,
+            _activity_watcher: activity_watcher,
         })
     }
 
@@ -210,12 +217,8 @@ impl App {
         const SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
         // Poll PR status every 30 seconds
         const PR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-        // Tick animation every 250ms for smooth spinner
-        const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
-        // Poll Claude activity every 500ms for responsive status updates
-        const ACTIVITY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-        // Poll Claude process count every 5 seconds
-        const CLAUDE_COUNT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+        // Tick animation every 200ms for smooth spinner
+        const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
         loop {
             // Check for background load results (worktrees, sessions, PRs)
@@ -231,18 +234,6 @@ impl App {
             if self.last_pr_poll.elapsed() >= PR_POLL_INTERVAL {
                 self.poll_pr_info_async();
                 self.last_pr_poll = std::time::Instant::now();
-            }
-
-            // Poll Claude activity status more frequently for responsive indicators
-            if self.last_activity_poll.elapsed() >= ACTIVITY_POLL_INTERVAL {
-                self.poll_claude_activity();
-                self.last_activity_poll = std::time::Instant::now();
-            }
-
-            // Poll Claude process count periodically
-            if self.last_claude_count_poll.elapsed() >= CLAUDE_COUNT_POLL_INTERVAL {
-                self.poll_claude_count_async();
-                self.last_claude_count_poll = std::time::Instant::now();
             }
 
             // Tick animation for spinners
@@ -286,18 +277,24 @@ impl App {
         }
 
         // Non-blocking check for session results
+        let mut sessions_updated = false;
         while let Ok(result) = self.session_receiver.try_recv() {
             match result {
                 Ok(sessions) => {
                     self.state.sessions.set_sessions(sessions);
                     self.state.sessions.loading = false;
                     self.state.sessions.error = None;
+                    sessions_updated = true;
                 }
                 Err(e) => {
                     self.state.sessions.error = Some(e);
                     self.state.sessions.loading = false;
                 }
             }
+        }
+        // Update activity state immediately after sessions refresh
+        if sessions_updated {
+            self.poll_claude_activity();
         }
 
         // Non-blocking check for PR info results
@@ -361,10 +358,25 @@ impl App {
             }
         }
 
-        // Non-blocking check for Claude process count results
-        while let Ok(count) = self.claude_count_receiver.try_recv() {
-            self.state.claude_process_count = count;
-            self.state.claude_count_loading = false;
+        // Non-blocking check for activity file changes (event-driven)
+        let mut activity_changed = false;
+        while let Ok(path) = self.activity_receiver.try_recv() {
+            tracing::debug!("Activity file changed: {:?}", path);
+            if let Some(result) = self.claude_activity_tracker.update_from_file(&path) {
+                tracing::debug!(
+                    "Activity state: {:?}, context: {:?}",
+                    result.state,
+                    result.context_percentage
+                );
+            }
+            activity_changed = true;
+        }
+        if activity_changed {
+            // Update session states and Claude count
+            self.claude_activity_tracker
+                .update_sessions(&mut self.state.sessions.sessions);
+            self.state.claude_process_count = count_active_sessions();
+            tracing::debug!("Updated {} sessions", self.state.sessions.sessions.len());
         }
     }
 
@@ -431,14 +443,6 @@ impl App {
                 }
                 View::Worktrees => {
                     render_worktrees(frame, chunks[1], &self.state.worktrees);
-                }
-                View::Sessions => {
-                    render_sessions(
-                        frame,
-                        chunks[1],
-                        &self.state.sessions,
-                        self.state.spinner_char(),
-                    );
                 }
                 View::Logs => {
                     render_logs(frame, chunks[1], &self.state.logs);
@@ -545,9 +549,6 @@ impl App {
             Action::SwitchWorktree => {
                 // TODO: Implement worktree switching
             }
-            Action::ShowSessions => {
-                self.handle_show_sessions()?;
-            }
             Action::LaunchSession => {
                 self.handle_launch_session(terminal, false)?;
             }
@@ -561,13 +562,6 @@ impl App {
                 // PR binding not available in standalone mode
                 tracing::info!("PR binding requires server mode");
             }
-            Action::AttachSession => {
-                self.handle_attach_session(terminal)?;
-            }
-            Action::KillSession => {
-                self.handle_kill_session()?;
-            }
-
             // Search actions
             Action::StartSearch => {
                 // Populate search with current tasks and switch to search view
@@ -704,7 +698,7 @@ impl App {
                 self.state.selected_task_plan = None;
                 self.state.view = View::Kanban;
             }
-            View::Worktrees | View::Sessions | View::Logs => {
+            View::Worktrees | View::Logs => {
                 self.state.view = View::Kanban;
             }
             View::Search => {
@@ -738,9 +732,6 @@ impl App {
             View::Worktrees => {
                 self.state.worktrees.select_prev();
             }
-            View::Sessions => {
-                self.state.sessions.select_prev();
-            }
             View::Logs => {
                 self.state.logs.scroll_up();
             }
@@ -772,9 +763,6 @@ impl App {
             View::TaskDetail => {}
             View::Worktrees => {
                 self.state.worktrees.select_next();
-            }
-            View::Sessions => {
-                self.state.sessions.select_next();
             }
             View::Logs => {
                 self.state.logs.scroll_down();
@@ -849,10 +837,6 @@ impl App {
                 // Launch session in selected worktree
                 self.handle_launch_session(terminal, false)?;
             }
-            View::Sessions => {
-                // Attach to selected session
-                self.handle_attach_session(terminal)?;
-            }
             View::Logs => {
                 // Refresh logs on select
                 self.state.logs.refresh();
@@ -883,9 +867,6 @@ impl App {
             }
             View::Worktrees => {
                 self.load_worktrees();
-            }
-            View::Sessions => {
-                self.load_sessions();
             }
             View::Logs => {
                 self.state.logs.refresh();
@@ -1072,29 +1053,6 @@ impl App {
         });
     }
 
-    fn handle_show_sessions(&mut self) -> Result<()> {
-        self.load_sessions();
-        self.state.view = View::Sessions;
-        Ok(())
-    }
-
-    fn load_sessions(&mut self) {
-        // Skip if already loading
-        if self.state.sessions.loading {
-            return;
-        }
-
-        self.state.sessions.loading = true;
-        self.state.sessions.error = None;
-
-        // Spawn background task
-        let sender = self.session_sender.clone();
-        tokio::task::spawn_blocking(move || {
-            let result = list_sessions_with_status().map_err(|e| e.to_string());
-            let _ = sender.blocking_send(result);
-        });
-    }
-
     fn poll_sessions_async(&mut self) {
         // Spawn background task to refresh session status
         // Only if not already loading (avoid stacking requests)
@@ -1117,18 +1075,6 @@ impl App {
         // Update Claude activity state for all sessions
         self.claude_activity_tracker
             .update_sessions(&mut self.state.sessions.sessions);
-    }
-
-    fn poll_claude_count_async(&mut self) {
-        if self.state.claude_count_loading {
-            return;
-        }
-        self.state.claude_count_loading = true;
-        let sender = self.claude_count_sender.clone();
-        tokio::task::spawn_blocking(move || {
-            let count = count_claude_processes();
-            let _ = sender.blocking_send(count);
-        });
     }
 
     /// Get the project directory (current working directory)
@@ -1244,47 +1190,6 @@ impl App {
                 tracing::warn!("No PR URL for this task");
             }
         }
-        Ok(())
-    }
-
-    fn handle_attach_session(&mut self, terminal: &mut Terminal) -> Result<()> {
-        let Some(session) = self.state.sessions.selected() else {
-            tracing::warn!("No session selected");
-            return Ok(());
-        };
-
-        let session_name = session.name.clone();
-
-        // Suspend TUI, attach to zellij, then resume TUI
-        terminal.suspend()?;
-
-        let result = attach_zellij_foreground(&session_name);
-
-        terminal.resume()?;
-
-        if let Err(e) = result {
-            tracing::error!("Failed to attach session: {}", e);
-        } else {
-            tracing::info!("Returned from session {}", session_name);
-        }
-
-        Ok(())
-    }
-
-    fn handle_kill_session(&mut self) -> Result<()> {
-        let Some(session) = self.state.sessions.selected() else {
-            tracing::warn!("No session selected");
-            return Ok(());
-        };
-
-        if let Err(e) = crate::external::kill_session(&session.name) {
-            tracing::error!("Failed to kill session: {}", e);
-        } else {
-            tracing::info!("Killed session {}", session.name);
-            // Refresh the sessions list
-            self.load_sessions();
-        }
-
         Ok(())
     }
 }

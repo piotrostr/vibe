@@ -9,7 +9,6 @@ pub enum View {
     Kanban,
     TaskDetail,
     Worktrees,
-    Sessions,
     #[allow(dead_code)]
     Logs,
     Search,
@@ -64,11 +63,8 @@ pub struct AppState {
     /// None means not in command mode, Some(s) means currently typing command
     pub command_input: Option<String>,
 
-    /// Cached count of running Claude processes (polled in background)
+    /// Cached count of running Claude processes
     pub claude_process_count: usize,
-
-    /// True when a Claude process count poll is in flight
-    pub claude_count_loading: bool,
 }
 
 impl AppState {
@@ -107,7 +103,6 @@ impl AppState {
             command_input: None,
 
             claude_process_count: 0,
-            claude_count_loading: false,
         }
     }
 
@@ -116,7 +111,8 @@ impl AppState {
     }
 
     pub fn spinner_char(&self) -> char {
-        const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
+        // Match Claude Code's spinner characters for authentic feel
+        const SPINNER: [char; 4] = ['✽', '✶', '✢', '✳'];
         SPINNER[self.animation_frame as usize]
     }
 }

@@ -111,9 +111,19 @@ impl ClaudeActivityTracker {
         normalized_dir.contains(&normalized_session)
     }
 
+    /// Check if a .thinking signal file exists for this working directory
+    fn has_thinking_signal(&self, working_dir: &str) -> bool {
+        let hash = format!("{:x}", md5::compute(working_dir.as_bytes()))
+            .chars()
+            .take(16)
+            .collect::<String>();
+        self.state_dir.join(format!("{}.thinking", hash)).exists()
+    }
+
     fn determine_state(&mut self, status: &ClaudeStatusFile) -> ActivityResult {
-        // If hooks tell us Claude is thinking, trust that immediately
-        let state = if status.thinking {
+        // Check for .thinking signal file first (fastest detection from hooks)
+        // Then fall back to JSON field, then timing-based detection
+        let state = if self.has_thinking_signal(&status.working_dir) || status.thinking {
             ClaudeActivityState::Thinking
         } else if let Some(last_update) = self.last_update_times.get(&status.working_dir) {
             // Fallback to timing-based detection
@@ -184,11 +194,23 @@ impl ActivityWatcher {
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 if let Ok(event) = res
-                    && matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_))
+                    && matches!(
+                        event.kind,
+                        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+                    )
                 {
                     for path in event.paths {
-                        if path.extension().map(|e| e == "json").unwrap_or(false) {
-                            let _ = sender.blocking_send(path);
+                        let ext = path.extension().and_then(|e| e.to_str());
+                        // Watch both .json files and .thinking signal files
+                        if matches!(ext, Some("json") | Some("thinking")) {
+                            // For .thinking files, send the corresponding .json path
+                            // so the tracker knows which session to update
+                            let notify_path = if ext == Some("thinking") {
+                                path.with_extension("json")
+                            } else {
+                                path
+                            };
+                            let _ = sender.blocking_send(notify_path);
                         }
                     }
                 }

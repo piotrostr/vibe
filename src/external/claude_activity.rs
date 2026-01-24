@@ -176,10 +176,6 @@ pub struct ActivityWatcher {
 
 impl ActivityWatcher {
     pub fn new(sender: mpsc::Sender<PathBuf>) -> Result<Self> {
-        // Use minimal poll interval for lowest latency
-        let config = Config::default()
-            .with_poll_interval(std::time::Duration::from_millis(100));
-
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
                 if let Ok(event) = res {
@@ -189,13 +185,13 @@ impl ActivityWatcher {
                     ) {
                         for path in event.paths {
                             if path.extension().map(|e| e == "json").unwrap_or(false) {
-                                let _ = sender.try_send(path); // Non-blocking
+                                let _ = sender.blocking_send(path);
                             }
                         }
                     }
                 }
             },
-            config,
+            Config::default(),
         )?;
 
         let activity_dir = dirs::home_dir()

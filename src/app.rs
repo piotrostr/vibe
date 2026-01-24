@@ -17,8 +17,7 @@ use crate::storage::TaskStorage;
 use crate::terminal::Terminal;
 use crate::ui::{
     render_footer, render_header, render_help_modal, render_kanban_board, render_logs,
-    render_logs_overlay, render_search, render_task_detail_with_actions,
-    render_worktrees,
+    render_logs_overlay, render_search, render_task_detail_with_actions, render_worktrees,
 };
 
 type WorktreeResult = Result<Vec<WorktreeInfo>, String>;
@@ -364,7 +363,11 @@ impl App {
         while let Ok(path) = self.activity_receiver.try_recv() {
             tracing::debug!("Activity file changed: {:?}", path);
             if let Some(result) = self.claude_activity_tracker.update_from_file(&path) {
-                tracing::debug!("Activity state: {:?}, context: {:?}", result.state, result.context_percentage);
+                tracing::debug!(
+                    "Activity state: {:?}, context: {:?}",
+                    result.state,
+                    result.context_percentage
+                );
             }
             activity_changed = true;
         }
@@ -1189,7 +1192,6 @@ impl App {
         }
         Ok(())
     }
-
 }
 
 /// Convert task title to a branch name slug.

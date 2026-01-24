@@ -20,6 +20,8 @@ struct ClaudeStatusFile {
     #[serde(default)]
     #[allow(dead_code)]
     session_id: Option<String>,
+    #[serde(default)]
+    thinking: bool, // true when Claude is actively thinking (set by hooks)
     #[allow(dead_code)]
     input_tokens: Option<u64>,
     #[allow(dead_code)]
@@ -110,8 +112,11 @@ impl ClaudeActivityTracker {
     }
 
     fn determine_state(&mut self, status: &ClaudeStatusFile) -> ActivityResult {
-        // Check how long since we last received a file change event for this session
-        let state = if let Some(last_update) = self.last_update_times.get(&status.working_dir) {
+        // If hooks tell us Claude is thinking, trust that immediately
+        let state = if status.thinking {
+            ClaudeActivityState::Thinking
+        } else if let Some(last_update) = self.last_update_times.get(&status.working_dir) {
+            // Fallback to timing-based detection
             let elapsed = last_update.elapsed().as_secs();
 
             if elapsed < THINKING_THRESHOLD_SECS {
@@ -178,15 +183,12 @@ impl ActivityWatcher {
     pub fn new(sender: mpsc::Sender<PathBuf>) -> Result<Self> {
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
-                if let Ok(event) = res {
-                    if matches!(
-                        event.kind,
-                        EventKind::Create(_) | EventKind::Modify(_)
-                    ) {
-                        for path in event.paths {
-                            if path.extension().map(|e| e == "json").unwrap_or(false) {
-                                let _ = sender.blocking_send(path);
-                            }
+                if let Ok(event) = res
+                    && matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_))
+                {
+                    for path in event.paths {
+                        if path.extension().map(|e| e == "json").unwrap_or(false) {
+                            let _ = sender.blocking_send(path);
                         }
                     }
                 }
@@ -279,6 +281,7 @@ mod tests {
         let json = r#"{
             "working_dir": "/Users/test/my-project",
             "session_id": "abc-123-def",
+            "thinking": true,
             "input_tokens": 1500,
             "output_tokens": 500,
             "used_percentage": 25.5,
@@ -289,6 +292,7 @@ mod tests {
         let status: ClaudeStatusFile = serde_json::from_str(json).unwrap();
         assert_eq!(status.working_dir, "/Users/test/my-project");
         assert_eq!(status.session_id, Some("abc-123-def".to_string()));
+        assert!(status.thinking);
         assert_eq!(status.input_tokens, Some(1500));
         assert_eq!(status.output_tokens, Some(500));
         assert_eq!(status.used_percentage, Some(25.5));
@@ -309,6 +313,7 @@ mod tests {
         let status: ClaudeStatusFile = serde_json::from_str(json).unwrap();
         assert_eq!(status.working_dir, "/Users/test/my-project");
         assert_eq!(status.session_id, None);
+        assert!(!status.thinking); // defaults to false
         assert_eq!(status.used_percentage, None);
         assert_eq!(status.api_duration_ms, None);
     }
@@ -334,6 +339,29 @@ mod tests {
     }
 
     #[test]
+    fn test_activity_state_thinking_from_hook() {
+        let mut tracker = ClaudeActivityTracker::new();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        // thinking=true from hook should immediately show Thinking
+        let status = ClaudeStatusFile {
+            working_dir: "/test/project".to_string(),
+            session_id: Some("test-session".to_string()),
+            thinking: true,
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            used_percentage: Some(10.0),
+            api_duration_ms: Some(1000),
+            timestamp: now,
+        };
+        let result = tracker.determine_state(&status);
+        assert_eq!(result.state, ClaudeActivityState::Thinking);
+    }
+
+    #[test]
     fn test_activity_state_thinking_recent_update() {
         let mut tracker = ClaudeActivityTracker::new();
         let now = SystemTime::now()
@@ -347,6 +375,7 @@ mod tests {
         let status = ClaudeStatusFile {
             working_dir: "/test/project".to_string(),
             session_id: Some("test-session".to_string()),
+            thinking: false,
             input_tokens: Some(100),
             output_tokens: Some(50),
             used_percentage: Some(10.0),
@@ -375,6 +404,7 @@ mod tests {
         let status = ClaudeStatusFile {
             working_dir: "/test/project".to_string(),
             session_id: None,
+            thinking: false,
             input_tokens: Some(100),
             output_tokens: Some(50),
             used_percentage: Some(10.0),
@@ -398,6 +428,7 @@ mod tests {
         let status = ClaudeStatusFile {
             working_dir: "/test/project".to_string(),
             session_id: None,
+            thinking: false,
             input_tokens: Some(100),
             output_tokens: Some(50),
             used_percentage: Some(10.0),
@@ -420,6 +451,7 @@ mod tests {
         let status = ClaudeStatusFile {
             working_dir: "/test/project".to_string(),
             session_id: None,
+            thinking: false,
             input_tokens: Some(100),
             output_tokens: Some(50),
             used_percentage: Some(75.5),

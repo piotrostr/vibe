@@ -74,7 +74,12 @@ pub fn list_sessions() -> Result<Vec<ZellijSession>> {
             let is_dead = clean_line.contains("EXITED");
 
             // Extract session name: everything before first '[' or space with metadata
-            let name = clean_line.split('[').next().unwrap_or("").trim().to_string();
+            let name = clean_line
+                .split('[')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
 
             ZellijSession {
                 name,

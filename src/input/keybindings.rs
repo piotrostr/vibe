@@ -198,4 +198,3 @@ fn worktrees_bindings(key: KeyEvent) -> Option<Action> {
         _ => None,
     }
 }
-

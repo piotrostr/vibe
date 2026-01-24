@@ -115,7 +115,8 @@ impl AppState {
     }
 
     pub fn spinner_char(&self) -> char {
-        const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
+        // Match Claude Code's spinner characters for authentic feel
+        const SPINNER: [char; 4] = ['✽', '✶', '✢', '✳'];
         SPINNER[self.animation_frame as usize]
     }
 }

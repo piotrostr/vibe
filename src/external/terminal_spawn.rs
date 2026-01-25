@@ -335,7 +335,10 @@ pub fn launch_zellij_claude_in_worktree_with_context(
     // Non-plan mode: dangerous permissions (red mode)
     let (fresh_cmd, continue_cmd) = if plan_mode {
         (
-            format!("claude --permission-mode plan \"$(cat {})\"", context_file.display()),
+            format!(
+                "claude --permission-mode plan \"$(cat {})\"",
+                context_file.display()
+            ),
             "claude --continue --permission-mode plan".to_string(),
         )
     } else {

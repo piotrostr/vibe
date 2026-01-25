@@ -138,10 +138,10 @@ fn render_row(
                         task.pr_review_decision.as_deref(),
                         task.pr_checks_status.as_deref(),
                     ) {
-                        (Some("APPROVED"), _) => ("[v]", Color::Green),
+                        (Some("APPROVED"), _) => ("[✓]", Color::Green),
                         (Some("CHANGES_REQUESTED"), _) => ("[?]", Color::Yellow),
-                        (_, Some("FAILURE")) => ("[x]", Color::Red),
-                        (_, Some("SUCCESS")) => ("[+]", Color::Green),
+                        (_, Some("FAILURE")) => ("[✗]", Color::Red),
+                        (_, Some("SUCCESS")) => ("[✓]", Color::Green),
                         _ => ("[PR]", Color::Cyan),
                     },
                 };
@@ -154,26 +154,69 @@ fn render_row(
                 }
             } else if let Some(pr) = branch_pr {
                 // Use locally detected PR info from gh
-                let (pr_icon, pr_color) = match pr.state.as_str() {
-                    "MERGED" => ("[M]", Color::Magenta),
-                    "CLOSED" => ("[X]", Color::Red),
+                match pr.state.as_str() {
+                    "MERGED" => {
+                        spans.push(Span::styled(" [M]", Style::default().fg(Color::Magenta)));
+                    }
+                    "CLOSED" => {
+                        spans.push(Span::styled(" [X]", Style::default().fg(Color::Red)));
+                    }
                     _ => {
                         // Open PR - check review/checks status
-                        match (pr.review_decision.as_deref(), pr.checks_status().as_deref()) {
-                            (Some("APPROVED"), _) => ("[v]", Color::Green),
-                            (Some("CHANGES_REQUESTED"), _) => ("[?]", Color::Yellow),
-                            (_, Some("FAILURE")) => ("[x]", Color::Red),
-                            (_, Some("SUCCESS")) => ("[+]", Color::Green),
-                            (_, Some("PENDING")) => ("[~]", Color::Yellow),
-                            _ if pr.is_draft => ("[D]", Color::DarkGray),
-                            _ => ("[PR]", Color::Cyan),
+                        if pr.review_decision.as_deref() == Some("APPROVED") {
+                            let approvers = pr.approvers();
+                            let approver_str = approvers
+                                .iter()
+                                .map(|u| format!("@{}", u))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let icon = if approver_str.is_empty() {
+                                "[✓]".to_string()
+                            } else {
+                                format!("[✓ {}]", approver_str)
+                            };
+                            spans.push(Span::styled(
+                                format!(" {}", icon),
+                                Style::default().fg(Color::Green),
+                            ));
+                        } else if pr.review_decision.as_deref() == Some("CHANGES_REQUESTED") {
+                            spans.push(Span::styled(" [?]", Style::default().fg(Color::Yellow)));
+                        } else {
+                            match pr.checks_status().as_deref() {
+                                Some("FAILURE") => {
+                                    spans.push(Span::styled(
+                                        " [✗]",
+                                        Style::default().fg(Color::Red),
+                                    ));
+                                }
+                                Some("SUCCESS") => {
+                                    spans.push(Span::styled(
+                                        " [✓]",
+                                        Style::default().fg(Color::Green),
+                                    ));
+                                }
+                                Some("PENDING") => {
+                                    spans.push(Span::styled(
+                                        " [~]",
+                                        Style::default().fg(Color::Yellow),
+                                    ));
+                                }
+                                _ if pr.is_draft => {
+                                    spans.push(Span::styled(
+                                        " [D]",
+                                        Style::default().fg(Color::DarkGray),
+                                    ));
+                                }
+                                _ => {
+                                    spans.push(Span::styled(
+                                        " [PR]",
+                                        Style::default().fg(Color::Cyan),
+                                    ));
+                                }
+                            }
                         }
                     }
-                };
-                spans.push(Span::styled(
-                    format!(" {}", pr_icon),
-                    Style::default().fg(pr_color),
-                ));
+                }
                 if pr.has_conflicts() {
                     spans.push(Span::styled(" !", Style::default().fg(Color::Red)));
                 }

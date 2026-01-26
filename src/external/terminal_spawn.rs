@@ -117,6 +117,59 @@ fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// Create the dev tab script that runs just setup if available
+fn create_dev_script(session_name: &str, script_dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dev_script_path = script_dir.join(format!("{}-dev.sh", session_name));
+    let dev_script = r#"#!/bin/zsh
+# Run just setup if justfile exists and has setup recipe
+if command -v just &>/dev/null && [[ -f justfile ]] && just --list 2>/dev/null | grep -q '^setup '; then
+    just setup
+fi
+# Keep shell open for manual commands
+exec zsh
+"#;
+    let mut file = std::fs::File::create(&dev_script_path)?;
+    file.write_all(dev_script.as_bytes())?;
+    drop(file);
+    std::fs::set_permissions(&dev_script_path, std::fs::Permissions::from_mode(0o755))?;
+
+    Ok(dev_script_path)
+}
+
+/// Create a Zellij KDL layout file with two tabs: claude and dev
+fn create_session_layout(
+    session_name: &str,
+    claude_script: &std::path::Path,
+    dev_script: &std::path::Path,
+    script_dir: &std::path::Path,
+    layout_suffix: &str,
+) -> Result<std::path::PathBuf> {
+    use std::io::Write;
+
+    let layout_path = script_dir.join(format!("{}-layout-{}.kdl", session_name, layout_suffix));
+    let layout_content = format!(
+        r#"layout {{
+    tab name="claude" focus=true {{
+        pane command="{claude_script}"
+    }}
+    tab name="dev" {{
+        pane command="{dev_script}"
+    }}
+}}
+"#,
+        claude_script = claude_script.display(),
+        dev_script = dev_script.display(),
+    );
+
+    let mut file = std::fs::File::create(&layout_path)?;
+    file.write_all(layout_content.as_bytes())?;
+
+    Ok(layout_path)
+}
+
 /// Create a launcher script for zellij session
 /// fresh_cmd: command for new sessions (with prompt)
 /// continue_cmd: command for resuming EXITED sessions (with --continue)
@@ -136,7 +189,6 @@ fn create_launcher_script(
     std::fs::create_dir_all(&script_dir)?;
 
     // Create wrapper scripts for fresh and continue commands
-    // This is more reliable than passing complex commands via -- flag
     let fresh_script_path = script_dir.join(format!("{}-fresh.sh", session_name));
     let fresh_script = format!("#!/bin/zsh\nexec {}\n", fresh_cmd);
     let mut file = std::fs::File::create(&fresh_script_path)?;
@@ -154,6 +206,25 @@ fn create_launcher_script(
         std::fs::Permissions::from_mode(0o755),
     )?;
 
+    // Create the dev tab script
+    let dev_script_path = create_dev_script(session_name, &script_dir)?;
+
+    // Create layouts for fresh and continue scenarios
+    let fresh_layout = create_session_layout(
+        session_name,
+        &fresh_script_path,
+        &dev_script_path,
+        &script_dir,
+        "fresh",
+    )?;
+    let continue_layout = create_session_layout(
+        session_name,
+        &continue_script_path,
+        &dev_script_path,
+        &script_dir,
+        "continue",
+    )?;
+
     // Track plan mode state in a marker file
     let plan_marker = script_dir.join(format!("{}-plan.marker", session_name));
 
@@ -163,7 +234,7 @@ fn create_launcher_script(
     // - Running: attach to it
     // - EXITED: delete and create with --continue (resume conversation)
     // - Not found: create new with prompt
-    // Use SHELL=/path/to/script zellij -s session to run script as the shell
+    // Use --layout to create sessions with two tabs: claude + dev
     let launcher_path = script_dir.join(format!("{}-launch.sh", session_name));
     let launcher_script = if plan_mode {
         format!(
@@ -177,7 +248,7 @@ if [[ -n "$SESSION_LINE" ]]; then
   if echo "$SESSION_LINE" | grep -q "EXITED"; then
     zellij delete-session {session} 2>/dev/null
     touch {plan_marker}
-    SHELL={continue_script} exec zellij -s {session}
+    exec zellij -s {session} --layout {continue_layout}
   else
     # Plan mode requested - check if session was started in plan mode
     if [[ ! -f {plan_marker} ]]; then
@@ -185,18 +256,18 @@ if [[ -n "$SESSION_LINE" ]]; then
       zellij kill-session {session} 2>/dev/null
       sleep 0.2
       touch {plan_marker}
-      SHELL={fresh_script} exec zellij -s {session}
+      exec zellij -s {session} --layout {fresh_layout}
     else
       exec zellij attach {session}
     fi
   fi
 fi
 touch {plan_marker}
-SHELL={fresh_script} exec zellij -s {session}
+exec zellij -s {session} --layout {fresh_layout}
 "#,
             session = session_name,
-            fresh_script = fresh_script_path.display(),
-            continue_script = continue_script_path.display(),
+            fresh_layout = fresh_layout.display(),
+            continue_layout = continue_layout.display(),
             plan_marker = plan_marker.display(),
         )
     } else {
@@ -211,17 +282,17 @@ if [[ -n "$SESSION_LINE" ]]; then
   if echo "$SESSION_LINE" | grep -q "EXITED"; then
     zellij delete-session {session} 2>/dev/null
     rm -f {plan_marker}
-    SHELL={continue_script} exec zellij -s {session}
+    exec zellij -s {session} --layout {continue_layout}
   else
     exec zellij attach {session}
   fi
 fi
 rm -f {plan_marker}
-SHELL={fresh_script} exec zellij -s {session}
+exec zellij -s {session} --layout {fresh_layout}
 "#,
             session = session_name,
-            fresh_script = fresh_script_path.display(),
-            continue_script = continue_script_path.display(),
+            fresh_layout = fresh_layout.display(),
+            continue_layout = continue_layout.display(),
             plan_marker = plan_marker.display(),
         )
     };

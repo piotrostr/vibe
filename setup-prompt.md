@@ -10,14 +10,15 @@ Reference documentation: https://github.com/piotrostr/vibe/blob/main/README.md
 
 2. **Install system dependencies**:
    - `zellij` - terminal multiplexer
+   - `neovim` - used as Zellij's scrollback editor
    - `jq` - JSON processor (for statusline)
    - `gh` - GitHub CLI (optional but recommended)
 
    Use the appropriate package manager:
-   - macOS: `brew install zellij jq gh`
-   - Debian/Ubuntu: `sudo apt install zellij jq gh`
-   - Fedora: `sudo dnf install zellij jq gh`
-   - Arch: `sudo pacman -S zellij jq github-cli`
+   - macOS: `brew install zellij neovim jq gh`
+   - Debian/Ubuntu: `sudo apt install zellij neovim jq gh`
+   - Fedora: `sudo dnf install zellij neovim jq gh`
+   - Arch: `sudo pacman -S zellij neovim jq github-cli`
 
 3. **Install Rust** if not present: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y`
 
@@ -228,6 +229,7 @@ Reference documentation: https://github.com/piotrostr/vibe/blob/main/README.md
     - `which vibe` - should show the installed binary
     - `which wt` - should show worktrunk
     - `which zellij` - should show zellij
+    - `which nvim` - should show neovim
     - `zellij --version` - should work
 
 17. **Print success message** with quick start instructions:

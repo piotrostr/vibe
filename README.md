@@ -47,6 +47,7 @@ cargo install --path .
 
 - [worktrunk](https://github.com/max-sixty/worktrunk) (`wt`) - git worktree manager
 - [zellij](https://zellij.dev/) - terminal multiplexer for Claude sessions
+- [neovim](https://neovim.io/) - used as Zellij's scrollback editor
 - [gh](https://cli.github.com/) (optional) - GitHub CLI for PR status
 
 ## Usage

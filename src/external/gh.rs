@@ -2,6 +2,18 @@ use anyhow::Result;
 use serde::Deserialize;
 use std::process::Command;
 
+/// PR review from a user
+#[derive(Debug, Clone, Deserialize)]
+pub struct Review {
+    pub state: String, // APPROVED, CHANGES_REQUESTED, COMMENTED, etc.
+    pub author: ReviewAuthor,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReviewAuthor {
+    pub login: String,
+}
+
 /// PR info fetched from `gh pr view`
 #[derive(Debug, Clone, Deserialize)]
 pub struct BranchPrInfo {
@@ -17,6 +29,8 @@ pub struct BranchPrInfo {
     pub status_check_rollup: Option<Vec<StatusCheck>>,
     #[serde(rename = "mergeable")]
     pub mergeable: Option<String>, // MERGEABLE, CONFLICTING, UNKNOWN
+    #[serde(default)]
+    pub reviews: Vec<Review>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -63,6 +77,15 @@ impl BranchPrInfo {
     pub fn has_conflicts(&self) -> bool {
         self.mergeable.as_deref() == Some("CONFLICTING")
     }
+
+    /// Get list of usernames who approved the PR
+    pub fn approvers(&self) -> Vec<&str> {
+        self.reviews
+            .iter()
+            .filter(|r| r.state == "APPROVED")
+            .map(|r| r.author.login.as_str())
+            .collect()
+    }
 }
 
 /// Get PR info for a specific branch using `gh pr view`
@@ -74,7 +97,7 @@ pub fn get_pr_for_branch(branch: &str) -> Result<Option<BranchPrInfo>> {
             "view",
             branch,
             "--json",
-            "number,url,state,isDraft,reviewDecision,statusCheckRollup,mergeable",
+            "number,url,state,isDraft,reviewDecision,statusCheckRollup,mergeable,reviews",
         ])
         .output()?;
 
@@ -92,4 +115,62 @@ pub fn get_pr_for_branch(branch: &str) -> Result<Option<BranchPrInfo>> {
     let stdout = String::from_utf8(output.stdout)?;
     let pr_info: BranchPrInfo = serde_json::from_str(&stdout)?;
     Ok(Some(pr_info))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_approvers() {
+        let pr = BranchPrInfo {
+            _number: 1,
+            url: "https://github.com/test/repo/pull/1".to_string(),
+            state: "OPEN".to_string(),
+            is_draft: false,
+            review_decision: Some("APPROVED".to_string()),
+            status_check_rollup: None,
+            mergeable: Some("MERGEABLE".to_string()),
+            reviews: vec![
+                Review {
+                    state: "APPROVED".to_string(),
+                    author: ReviewAuthor {
+                        login: "alice".to_string(),
+                    },
+                },
+                Review {
+                    state: "COMMENTED".to_string(),
+                    author: ReviewAuthor {
+                        login: "bob".to_string(),
+                    },
+                },
+                Review {
+                    state: "APPROVED".to_string(),
+                    author: ReviewAuthor {
+                        login: "charlie".to_string(),
+                    },
+                },
+            ],
+        };
+
+        let approvers = pr.approvers();
+        assert_eq!(approvers, vec!["alice", "charlie"]);
+    }
+
+    #[test]
+    fn test_approvers_empty() {
+        let pr = BranchPrInfo {
+            _number: 1,
+            url: "https://github.com/test/repo/pull/1".to_string(),
+            state: "OPEN".to_string(),
+            is_draft: false,
+            review_decision: None,
+            status_check_rollup: None,
+            mergeable: None,
+            reviews: vec![],
+        };
+
+        let approvers = pr.approvers();
+        assert!(approvers.is_empty());
+    }
 }

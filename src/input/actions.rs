@@ -23,6 +23,7 @@ pub enum Action {
     ViewPR,
     ViewPlan,
     BindPR,
+    MergePR,
 
     StartSearch,
     SearchType(char),

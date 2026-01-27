@@ -88,6 +88,20 @@ impl BranchPrInfo {
     }
 }
 
+/// Merge a PR for a specific branch using `gh pr merge --squash`
+pub fn merge_pr_for_branch(branch: &str) -> Result<()> {
+    let output = Command::new("gh")
+        .args(["pr", "merge", branch, "--squash"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("gh pr merge failed: {}", stderr);
+    }
+
+    Ok(())
+}
+
 /// Get PR info for a specific branch using `gh pr view`
 /// Returns None if no PR exists for the branch
 pub fn get_pr_for_branch(branch: &str) -> Result<Option<BranchPrInfo>> {

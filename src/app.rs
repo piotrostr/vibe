@@ -585,6 +585,9 @@ impl App {
                 // PR binding not available in standalone mode
                 tracing::info!("PR binding requires server mode");
             }
+            Action::MergePR => {
+                self.handle_merge_pr()?;
+            }
             // Search actions
             Action::StartSearch => {
                 // Populate search with current tasks and switch to search view
@@ -1282,6 +1285,41 @@ impl App {
                 }
             } else {
                 tracing::warn!("No PR URL for this task");
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_merge_pr(&mut self) -> Result<()> {
+        if let Some(task) = self.selected_task() {
+            let branch = task_title_to_branch(&task.title, task.linear_issue_id.as_deref());
+
+            // Check if PR exists and is mergeable
+            if let Some(pr_info) = self.state.worktrees.branch_prs.get(&branch) {
+                if pr_info.state != "OPEN" {
+                    tracing::warn!("PR is not open (state: {})", pr_info.state);
+                    return Ok(());
+                }
+
+                if pr_info.has_conflicts() {
+                    tracing::warn!("PR has merge conflicts");
+                    return Ok(());
+                }
+
+                // Attempt merge
+                tracing::info!("Merging PR for branch: {}", branch);
+                match crate::external::merge_pr_for_branch(&branch) {
+                    Ok(()) => {
+                        tracing::info!("PR merged successfully");
+                        // Refresh to update PR status
+                        self.refresh()?;
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to merge PR: {}", e);
+                    }
+                }
+            } else {
+                tracing::warn!("No PR found for this task");
             }
         }
         Ok(())

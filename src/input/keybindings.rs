@@ -159,6 +159,9 @@ fn kanban_bindings(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Action::ShowWorktrees),
         (KeyCode::Char('W'), KeyModifiers::SHIFT) => Some(Action::CreateWorktree),
 
+        // PR merge
+        (KeyCode::Char('M'), KeyModifiers::SHIFT) => Some(Action::MergePR),
+
         // Linear sync
         (KeyCode::Char('L'), KeyModifiers::SHIFT) => Some(Action::SyncLinear),
 
@@ -179,6 +182,7 @@ fn task_detail_bindings(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Action::LaunchSessionPlan),
         (KeyCode::Char('P'), KeyModifiers::SHIFT) => Some(Action::ViewPlan),
         (KeyCode::Char('v'), KeyModifiers::NONE) => Some(Action::ViewPR),
+        (KeyCode::Char('M'), KeyModifiers::SHIFT) => Some(Action::MergePR),
         (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Action::Refresh),
         (KeyCode::Enter | KeyCode::Char(' '), _) => Some(Action::LaunchSession),
         (KeyCode::Char('w'), KeyModifiers::NONE) => Some(Action::ShowWorktrees),

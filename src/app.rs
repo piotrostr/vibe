@@ -12,7 +12,9 @@ use crate::external::{
     launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
-use crate::state::{AppState, Modal, View, check_linear_api_key, linear_env_var_name};
+use crate::state::{
+    AppState, Modal, View, check_linear_api_key, linear_env_var_name, task_title_to_branch,
+};
 use crate::storage::TaskStorage;
 use crate::terminal::Terminal;
 use crate::ui::{
@@ -1306,55 +1308,5 @@ impl App {
             tracing::warn!("No plan available for this task");
         }
         Ok(())
-    }
-}
-
-/// Convert task title to a branch name slug.
-/// If linear_id is provided, prefixes the branch name with it (e.g., "AMB-67/add-feature").
-fn task_title_to_branch(title: &str, linear_id: Option<&str>) -> String {
-    let slug = title
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-
-    match linear_id {
-        Some(id) => format!("{}/{}", id, slug),
-        None => slug,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_task_title_to_branch_without_linear_id() {
-        assert_eq!(task_title_to_branch("Hello World", None), "hello-world");
-        assert_eq!(
-            task_title_to_branch("Add feature: user auth", None),
-            "add-feature-user-auth"
-        );
-        assert_eq!(task_title_to_branch("Fix bug #123", None), "fix-bug-123");
-        assert_eq!(
-            task_title_to_branch("  Multiple   Spaces  ", None),
-            "multiple-spaces"
-        );
-    }
-
-    #[test]
-    fn test_task_title_to_branch_with_linear_id() {
-        assert_eq!(
-            task_title_to_branch("Add some feature", Some("AMB-67")),
-            "AMB-67/add-some-feature"
-        );
-        assert_eq!(
-            task_title_to_branch("Fix the bug", Some("TEAM-123")),
-            "TEAM-123/fix-the-bug"
-        );
     }
 }

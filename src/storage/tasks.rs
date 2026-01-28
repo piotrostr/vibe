@@ -29,16 +29,51 @@ pub struct TaskFrontmatter {
 }
 
 impl TaskStorage {
-    /// Create storage for the current working directory's project
+    /// Create storage for the current working directory's project.
+    /// If in a git worktree, resolves to the main repository's project name.
     pub fn from_cwd() -> Result<Self> {
-        let cwd = std::env::current_dir().context("Failed to get current directory")?;
-        let project_name = cwd
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid directory name"))?
-            .to_string();
-
+        let project_name = Self::resolve_project_name()?;
         Self::new(&project_name)
+    }
+
+    /// Resolve project name, handling git worktrees.
+    /// Uses `git rev-parse --git-common-dir` to find the main repo.
+    fn resolve_project_name() -> Result<String> {
+        let cwd = std::env::current_dir().context("Failed to get current directory")?;
+
+        // Try to get the git common directory (shared across worktrees)
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .output();
+
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let git_common_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let git_path = std::path::Path::new(&git_common_dir);
+
+            // The parent of .git is the main repo directory
+            if let Some(repo_root) = git_path.parent() {
+                // Handle both absolute and relative paths
+                let repo_root = if repo_root.is_absolute() {
+                    repo_root.to_path_buf()
+                } else {
+                    cwd.join(repo_root)
+                        .canonicalize()
+                        .unwrap_or_else(|_| cwd.clone())
+                };
+
+                if let Some(name) = repo_root.file_name().and_then(|s| s.to_str()) {
+                    return Ok(name.to_string());
+                }
+            }
+        }
+
+        // Fallback to current directory name
+        cwd.file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("Invalid directory name"))
     }
 
     /// Create storage for a specific project name

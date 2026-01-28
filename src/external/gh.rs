@@ -343,7 +343,6 @@ pub fn get_all_open_prs() -> Result<HashMap<String, BranchPrInfo>> {
 
 /// Get PR info for a specific branch using `gh pr view`
 /// Returns None if no PR exists for the branch
-#[allow(dead_code)] // Kept for fallback/testing, prefer get_all_open_prs
 pub fn get_pr_for_branch(branch: &str) -> Result<Option<BranchPrInfo>> {
     let output = Command::new("gh")
         .args([

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use crate::external::{
     ActivityWatcher, BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader, LinearClient,
     LinearIssue, LinearIssueStatus, WorktreeInfo, ZellijSession, count_active_sessions,
-    edit_markdown, get_all_open_prs, launch_zellij_claude_in_worktree,
+    edit_markdown, get_all_open_prs, get_pr_for_branch, launch_zellij_claude_in_worktree,
     launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
@@ -416,9 +416,34 @@ impl App {
 
     fn fetch_pr_info_batch(&self) {
         let sender = self.pr_info_sender.clone();
+        // Collect task branches to do targeted lookups for PRs not in batch
+        let task_branches: Vec<String> = self
+            .state
+            .tasks
+            .tasks
+            .iter()
+            .map(|t| task_title_to_branch(&t.title, t.linear_issue_id.as_deref()))
+            .collect();
+
         tokio::task::spawn_blocking(move || {
-            let result = get_all_open_prs().map_err(|e| e.to_string());
-            let _ = sender.blocking_send(result);
+            let mut pr_map = match get_all_open_prs() {
+                Ok(map) => map,
+                Err(e) => {
+                    let _ = sender.blocking_send(Err(e.to_string()));
+                    return;
+                }
+            };
+
+            // For task branches not found in batch, do targeted lookup
+            for branch in task_branches {
+                if let std::collections::hash_map::Entry::Vacant(e) = pr_map.entry(branch.clone())
+                    && let Ok(Some(pr_info)) = get_pr_for_branch(&branch)
+                {
+                    e.insert(pr_info);
+                }
+            }
+
+            let _ = sender.blocking_send(Ok(pr_map));
         });
     }
 

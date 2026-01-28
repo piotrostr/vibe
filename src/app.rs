@@ -222,8 +222,8 @@ impl App {
     pub async fn run(&mut self, terminal: &mut Terminal) -> Result<()> {
         // Poll session status every 5 seconds
         const SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-        // Poll PR status every 30 seconds (single batch query for all open PRs)
-        const PR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+        // Poll PR status every 5 seconds (single batch query costs ~2 points, uses ~29% of rate limit)
+        const PR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
         // Tick animation every 200ms for smooth spinner
         const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 

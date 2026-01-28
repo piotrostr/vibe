@@ -241,6 +241,7 @@ impl App {
 
             // Poll PR status periodically
             if self.last_pr_poll.elapsed() >= PR_POLL_INTERVAL {
+                tracing::debug!("Periodic PR poll triggered");
                 self.poll_pr_info_async();
                 self.last_pr_poll = std::time::Instant::now();
             }
@@ -1211,6 +1212,7 @@ impl App {
     /// Trigger immediate refetch of PR and session info, resetting poll timers.
     /// Call this when returning to the Kanban view (similar to TanStack Query's refetchOnMount).
     fn refetch_on_kanban_mount(&mut self) {
+        tracing::info!("Refetch on kanban mount triggered");
         self.poll_pr_info_async();
         self.poll_sessions_async();
         self.last_pr_poll = std::time::Instant::now();

@@ -137,11 +137,7 @@ impl Task {
         has_worktree: bool,
         linear_status: Option<&LinearIssueStatus>,
     ) -> TaskStatus {
-        // Priority 1: PR status (merged/closed/open) - concrete git state
-        if self.pr_status.is_some() {
-            return self.effective_status();
-        }
-
+        // Priority 1: Live fetched PR status (most accurate, up-to-date)
         if let Some(pr) = branch_pr {
             match pr.state.as_str() {
                 "MERGED" => return TaskStatus::Done,
@@ -158,7 +154,12 @@ impl Task {
             }
         }
 
-        // Priority 2: Linear terminal states (completed/cancelled) override worktree
+        // Priority 2: Stored PR status (fallback if no live data)
+        if self.pr_status.is_some() {
+            return self.effective_status();
+        }
+
+        // Priority 3: Linear terminal states (completed/cancelled) override worktree
         if let Some(linear) = linear_status {
             match linear.state_type.as_str() {
                 "completed" => return TaskStatus::Done,
@@ -167,17 +168,17 @@ impl Task {
             }
         }
 
-        // Priority 3: Worktree presence upgrades backlog/unstarted to in-progress
+        // Priority 4: Worktree presence upgrades backlog/unstarted to in-progress
         if has_worktree {
             return TaskStatus::Inprogress;
         }
 
-        // Priority 4: Linear non-terminal status
+        // Priority 5: Linear non-terminal status
         if let Some(linear) = linear_status {
             return TaskStatus::from_linear_state_type(&linear.state_type);
         }
 
-        // Priority 5: Local stored status - fallback
+        // Priority 6: Local stored status - fallback
         self.status
     }
 }

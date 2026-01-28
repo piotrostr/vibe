@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use crate::external::{
     ActivityWatcher, BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader, LinearClient,
     LinearIssue, LinearIssueStatus, WorktreeInfo, ZellijSession, count_active_sessions,
-    edit_markdown, get_pr_for_branch, launch_zellij_claude_in_worktree,
+    edit_markdown, get_all_open_prs, launch_zellij_claude_in_worktree,
     launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
@@ -22,7 +22,7 @@ use crate::ui::{
 
 type WorktreeResult = Result<Vec<WorktreeInfo>, String>;
 type SessionResult = Result<Vec<ZellijSession>, String>;
-type BranchPrResult = (String, Option<BranchPrInfo>);
+type BatchPrResult = Result<std::collections::HashMap<String, BranchPrInfo>, String>;
 type LinearResult = Result<Vec<LinearIssue>, String>;
 type LinearStatusResult = Result<Vec<LinearIssueStatus>, String>;
 type PlanPresenceResult = (String, bool); // (task_id, has_plan)
@@ -41,8 +41,8 @@ pub struct App {
     worktree_sender: mpsc::Sender<WorktreeResult>,
     session_receiver: mpsc::Receiver<SessionResult>,
     session_sender: mpsc::Sender<SessionResult>,
-    pr_info_receiver: mpsc::Receiver<BranchPrResult>,
-    pr_info_sender: mpsc::Sender<BranchPrResult>,
+    pr_info_receiver: mpsc::Receiver<BatchPrResult>,
+    pr_info_sender: mpsc::Sender<BatchPrResult>,
     // Linear sync channels
     linear_receiver: mpsc::Receiver<LinearResult>,
     linear_sender: mpsc::Sender<LinearResult>,
@@ -82,7 +82,7 @@ impl App {
         // Create background loading channels
         let (worktree_sender, worktree_receiver) = mpsc::channel(4);
         let (session_sender, session_receiver) = mpsc::channel(4);
-        let (pr_info_sender, pr_info_receiver) = mpsc::channel(32);
+        let (pr_info_sender, pr_info_receiver) = mpsc::channel(4); // Reduced: batch results instead of per-branch
         let (linear_sender, linear_receiver) = mpsc::channel(4);
         let (linear_status_sender, linear_status_receiver) = mpsc::channel(4);
         let (activity_sender, activity_receiver) = mpsc::channel(32);
@@ -222,7 +222,7 @@ impl App {
     pub async fn run(&mut self, terminal: &mut Terminal) -> Result<()> {
         // Poll session status every 5 seconds
         const SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-        // Poll PR status every 30 seconds
+        // Poll PR status every 30 seconds (single batch query for all open PRs)
         const PR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
         // Tick animation every 200ms for smooth spinner
         const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
@@ -270,8 +270,8 @@ impl App {
         while let Ok(result) = self.worktree_receiver.try_recv() {
             match result {
                 Ok(worktrees) => {
-                    // Spawn PR info fetch for each branch
-                    self.fetch_pr_info_for_branches(&worktrees);
+                    // Fetch PR info for all branches in a single batch query
+                    self.fetch_pr_info_batch();
                     self.state.worktrees.set_worktrees(worktrees);
                     self.state.worktrees.loading = false;
                     self.state.worktrees.error = None;
@@ -306,12 +306,26 @@ impl App {
             self.poll_claude_activity();
         }
 
-        // Non-blocking check for PR info results
-        while let Ok((branch, pr_info)) = self.pr_info_receiver.try_recv() {
-            if let Some(info) = pr_info {
-                self.state.worktrees.set_branch_pr(branch, info);
-            } else {
-                self.state.worktrees.clear_branch_pr(&branch);
+        // Non-blocking check for batch PR info results
+        while let Ok(result) = self.pr_info_receiver.try_recv() {
+            match result {
+                Ok(pr_map) => {
+                    // Clear PRs for branches not in the response (no longer have open PRs)
+                    let current_branches: Vec<_> =
+                        self.state.worktrees.branch_prs.keys().cloned().collect();
+                    for branch in current_branches {
+                        if !pr_map.contains_key(&branch) {
+                            self.state.worktrees.clear_branch_pr(&branch);
+                        }
+                    }
+                    // Update all PRs from batch result
+                    for (branch, pr_info) in pr_map {
+                        self.state.worktrees.set_branch_pr(branch, pr_info);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to fetch PR info: {}", e);
+                }
             }
         }
 
@@ -398,22 +412,12 @@ impl App {
         }
     }
 
-    fn fetch_pr_info_for_branches(&self, worktrees: &[WorktreeInfo]) {
-        for wt in worktrees {
-            // Skip main/master branches - they don't have PRs
-            if wt.branch == "main" || wt.branch == "master" {
-                continue;
-            }
-
-            let branch = wt.branch.clone();
-            let sender = self.pr_info_sender.clone();
-
-            tokio::task::spawn_blocking(move || {
-                let result = get_pr_for_branch(&branch);
-                let pr_info = result.ok().flatten();
-                let _ = sender.blocking_send((branch, pr_info));
-            });
-        }
+    fn fetch_pr_info_batch(&self) {
+        let sender = self.pr_info_sender.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = get_all_open_prs().map_err(|e| e.to_string());
+            let _ = sender.blocking_send(result);
+        });
     }
 
     fn render(&mut self, terminal: &mut Terminal) -> Result<()> {
@@ -1124,9 +1128,8 @@ impl App {
     }
 
     fn poll_pr_info_async(&mut self) {
-        // Re-fetch PR info for all known worktree branches
-        let worktrees = self.state.worktrees.worktrees.clone();
-        self.fetch_pr_info_for_branches(&worktrees);
+        // Fetch PR info for all open PRs in a single batch query
+        self.fetch_pr_info_batch();
     }
 
     fn poll_claude_activity(&mut self) {

@@ -426,23 +426,69 @@ impl App {
             .collect();
 
         tokio::task::spawn_blocking(move || {
+            let start = std::time::Instant::now();
+
             let mut pr_map = match get_all_open_prs() {
-                Ok(map) => map,
+                Ok(map) => {
+                    tracing::info!(
+                        "Batch PR fetch: {} PRs in {:?}",
+                        map.len(),
+                        start.elapsed()
+                    );
+                    map
+                }
                 Err(e) => {
+                    tracing::error!("Batch PR fetch failed: {}", e);
                     let _ = sender.blocking_send(Err(e.to_string()));
                     return;
                 }
             };
 
-            // For task branches not found in batch, do targeted lookup
-            for branch in task_branches {
-                if let std::collections::hash_map::Entry::Vacant(e) = pr_map.entry(branch.clone())
-                    && let Ok(Some(pr_info)) = get_pr_for_branch(&branch)
-                {
-                    e.insert(pr_info);
+            // Find branches that need targeted lookup
+            let missing_branches: Vec<_> = task_branches
+                .into_iter()
+                .filter(|b| !pr_map.contains_key(b))
+                .collect();
+
+            if !missing_branches.is_empty() {
+                tracing::info!(
+                    "Targeted PR lookup for {} branches not in batch",
+                    missing_branches.len()
+                );
+
+                let lookup_start = std::time::Instant::now();
+
+                // Parallel lookups using thread scope
+                let results: Vec<_> = std::thread::scope(|s| {
+                    missing_branches
+                        .iter()
+                        .map(|branch| {
+                            let branch = branch.clone();
+                            s.spawn(move || (branch.clone(), get_pr_for_branch(&branch)))
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|handle| handle.join().unwrap())
+                        .collect()
+                });
+
+                let mut found = 0;
+                for (branch, result) in results {
+                    if let Ok(Some(pr_info)) = result {
+                        pr_map.insert(branch, pr_info);
+                        found += 1;
+                    }
                 }
+
+                tracing::info!(
+                    "Targeted lookup: found {}/{} PRs in {:?}",
+                    found,
+                    missing_branches.len(),
+                    lookup_start.elapsed()
+                );
             }
 
+            tracing::info!("Total PR fetch: {} PRs in {:?}", pr_map.len(), start.elapsed());
             let _ = sender.blocking_send(Ok(pr_map));
         });
     }

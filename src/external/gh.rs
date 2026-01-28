@@ -174,7 +174,7 @@ struct GraphQLContext {
 const BATCH_PR_QUERY: &str = r#"
 query($owner: String!, $repo: String!) {
   repository(owner: $owner, name: $repo) {
-    pullRequests(states: OPEN, first: 100) {
+    pullRequests(states: [OPEN, MERGED, CLOSED], first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes {
         number
         url
@@ -209,15 +209,15 @@ query($owner: String!, $repo: String!) {
 }
 "#;
 
-/// Fetch all open PRs for the repository in a single GraphQL query.
+/// Fetch all PRs (open, merged, closed) for the repository in a single GraphQL query.
 /// Returns a map from branch name to PR info.
 ///
 /// This is much more efficient than per-branch polling:
 /// - 1 API call instead of N calls for N branches
 /// - Reduces rate limit usage from N requests/poll to 1 request/poll
 ///
-/// Note: Limited to 100 open PRs. For repos with more open PRs,
-/// pagination would be needed (rare for most projects).
+/// Note: Limited to 100 most recently updated PRs. For repos with more PRs,
+/// pagination would be needed (rare for active worktrees).
 pub fn get_all_open_prs() -> Result<HashMap<String, BranchPrInfo>> {
     // Get owner and repo from gh CLI
     let repo_output = Command::new("gh")

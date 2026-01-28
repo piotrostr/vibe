@@ -726,14 +726,17 @@ impl App {
                 self.state.selected_task_id = None;
                 self.state.selected_task_plan = None;
                 self.state.view = View::Kanban;
+                self.refetch_on_kanban_mount();
             }
             View::Worktrees | View::Logs => {
                 self.state.view = View::Kanban;
+                self.refetch_on_kanban_mount();
             }
             View::Search => {
                 self.state.search.clear();
                 self.state.search_active = false;
                 self.state.view = View::Kanban;
+                self.refetch_on_kanban_mount();
             }
         }
     }
@@ -1134,6 +1137,15 @@ impl App {
         self.fetch_pr_info_batch();
     }
 
+    /// Trigger immediate refetch of PR and session info, resetting poll timers.
+    /// Call this when returning to the Kanban view (similar to TanStack Query's refetchOnMount).
+    fn refetch_on_kanban_mount(&mut self) {
+        self.poll_pr_info_async();
+        self.poll_sessions_async();
+        self.last_pr_poll = std::time::Instant::now();
+        self.last_session_poll = std::time::Instant::now();
+    }
+
     fn poll_claude_activity(&mut self) {
         // Update Claude activity state for all sessions
         self.claude_activity_tracker
@@ -1209,6 +1221,8 @@ impl App {
                     if let Err(e) = result {
                         tracing::error!("Failed to launch session: {}", e);
                     }
+                    // Refetch after returning from session
+                    self.refetch_on_kanban_mount();
                     return Ok(());
                 }
                 return Ok(());
@@ -1259,12 +1273,15 @@ impl App {
             tracing::error!("Failed to launch session: {}", e);
         }
 
-        // After returning from session, go back to kanban board
+        // After returning from session, go back to kanban board and refetch
         if self.state.view == View::TaskDetail {
             self.state.selected_task_id = None;
             self.state.selected_task_plan = None;
             self.state.view = View::Kanban;
         }
+
+        // Always refetch after returning from a session - PR state may have changed
+        self.refetch_on_kanban_mount();
 
         Ok(())
     }

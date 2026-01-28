@@ -12,7 +12,9 @@ use crate::external::{
     launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
-use crate::state::{AppState, Modal, View, check_linear_api_key, linear_env_var_name};
+use crate::state::{
+    AppState, Modal, View, check_linear_api_key, linear_env_var_name, task_title_to_branch,
+};
 use crate::storage::TaskStorage;
 use crate::terminal::Terminal;
 use crate::ui::{
@@ -724,14 +726,17 @@ impl App {
                 self.state.selected_task_id = None;
                 self.state.selected_task_plan = None;
                 self.state.view = View::Kanban;
+                self.refetch_on_kanban_mount();
             }
             View::Worktrees | View::Logs => {
                 self.state.view = View::Kanban;
+                self.refetch_on_kanban_mount();
             }
             View::Search => {
                 self.state.search.clear();
                 self.state.search_active = false;
                 self.state.view = View::Kanban;
+                self.refetch_on_kanban_mount();
             }
         }
     }
@@ -1132,6 +1137,15 @@ impl App {
         self.fetch_pr_info_batch();
     }
 
+    /// Trigger immediate refetch of PR and session info, resetting poll timers.
+    /// Call this when returning to the Kanban view (similar to TanStack Query's refetchOnMount).
+    fn refetch_on_kanban_mount(&mut self) {
+        self.poll_pr_info_async();
+        self.poll_sessions_async();
+        self.last_pr_poll = std::time::Instant::now();
+        self.last_session_poll = std::time::Instant::now();
+    }
+
     fn poll_claude_activity(&mut self) {
         // Update Claude activity state for all sessions
         self.claude_activity_tracker
@@ -1207,6 +1221,8 @@ impl App {
                     if let Err(e) = result {
                         tracing::error!("Failed to launch session: {}", e);
                     }
+                    // Refetch after returning from session
+                    self.refetch_on_kanban_mount();
                     return Ok(());
                 }
                 return Ok(());
@@ -1257,12 +1273,15 @@ impl App {
             tracing::error!("Failed to launch session: {}", e);
         }
 
-        // After returning from session, go back to kanban board
+        // After returning from session, go back to kanban board and refetch
         if self.state.view == View::TaskDetail {
             self.state.selected_task_id = None;
             self.state.selected_task_plan = None;
             self.state.view = View::Kanban;
         }
+
+        // Always refetch after returning from a session - PR state may have changed
+        self.refetch_on_kanban_mount();
 
         Ok(())
     }
@@ -1306,55 +1325,5 @@ impl App {
             tracing::warn!("No plan available for this task");
         }
         Ok(())
-    }
-}
-
-/// Convert task title to a branch name slug.
-/// If linear_id is provided, prefixes the branch name with it (e.g., "AMB-67/add-feature").
-fn task_title_to_branch(title: &str, linear_id: Option<&str>) -> String {
-    let slug = title
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-
-    match linear_id {
-        Some(id) => format!("{}/{}", id, slug),
-        None => slug,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_task_title_to_branch_without_linear_id() {
-        assert_eq!(task_title_to_branch("Hello World", None), "hello-world");
-        assert_eq!(
-            task_title_to_branch("Add feature: user auth", None),
-            "add-feature-user-auth"
-        );
-        assert_eq!(task_title_to_branch("Fix bug #123", None), "fix-bug-123");
-        assert_eq!(
-            task_title_to_branch("  Multiple   Spaces  ", None),
-            "multiple-spaces"
-        );
-    }
-
-    #[test]
-    fn test_task_title_to_branch_with_linear_id() {
-        assert_eq!(
-            task_title_to_branch("Add some feature", Some("AMB-67")),
-            "AMB-67/add-some-feature"
-        );
-        assert_eq!(
-            task_title_to_branch("Fix the bug", Some("TEAM-123")),
-            "TEAM-123/fix-the-bug"
-        );
     }
 }

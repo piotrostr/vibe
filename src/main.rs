@@ -36,10 +36,6 @@ enum Command {
         /// Task description (context, schedule, details)
         #[arg(short, long)]
         description: Option<String>,
-
-        /// Also create a self-assigned Linear issue (requires {PROJECT}_LINEAR_API_KEY)
-        #[arg(short, long)]
-        linear: bool,
     },
 }
 
@@ -48,26 +44,20 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Create {
-            title,
-            description,
-            linear,
-        }) => {
+        Some(Command::Create { title, description }) => {
             let storage = TaskStorage::from_cwd()?;
 
-            if linear {
-                let project = storage.project_name().to_uppercase().replace('-', "_");
-                let env_var = format!("{}_LINEAR_API_KEY", project);
-                let api_key =
-                    std::env::var(&env_var).map_err(|_| anyhow::anyhow!("{} not set", env_var))?;
+            // Check for project-specific Linear API key
+            let project = storage.project_name().to_uppercase().replace('-', "_");
+            let env_var = format!("{}_LINEAR_API_KEY", project);
 
+            if let Ok(api_key) = std::env::var(&env_var) {
                 let client = LinearClient::new(api_key);
                 let created = client
                     .create_issue(&title, description.as_deref())
                     .await
                     .map_err(|e| anyhow::anyhow!("Linear: {}", e))?;
 
-                // Create local task linked to Linear
                 let linear_issue = external::LinearIssue {
                     identifier: created.identifier.clone(),
                     title: title.clone(),

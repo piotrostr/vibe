@@ -248,7 +248,7 @@ if [[ -n "$SESSION_LINE" ]]; then
   if echo "$SESSION_LINE" | grep -q "EXITED"; then
     zellij delete-session {session} 2>/dev/null
     touch {plan_marker}
-    exec zellij -s {session} --layout {continue_layout}
+    exec zellij -s {session} --layout {continue_layout} --default-shell /bin/zsh
   else
     # Plan mode requested - check if session was started in plan mode
     if [[ ! -f {plan_marker} ]]; then
@@ -256,14 +256,14 @@ if [[ -n "$SESSION_LINE" ]]; then
       zellij kill-session {session} 2>/dev/null
       sleep 0.2
       touch {plan_marker}
-      exec zellij -s {session} --layout {fresh_layout}
+      exec zellij -s {session} --layout {fresh_layout} --default-shell /bin/zsh
     else
       exec zellij attach {session}
     fi
   fi
 fi
 touch {plan_marker}
-exec zellij -s {session} --layout {fresh_layout}
+exec zellij -s {session} --layout {fresh_layout} --default-shell /bin/zsh
 "#,
             session = session_name,
             fresh_layout = fresh_layout.display(),
@@ -282,13 +282,13 @@ if [[ -n "$SESSION_LINE" ]]; then
   if echo "$SESSION_LINE" | grep -q "EXITED"; then
     zellij delete-session {session} 2>/dev/null
     rm -f {plan_marker}
-    exec zellij -s {session} --layout {continue_layout}
+    exec zellij -s {session} --layout {continue_layout} --default-shell /bin/zsh
   else
     exec zellij attach {session}
   fi
 fi
 rm -f {plan_marker}
-exec zellij -s {session} --layout {fresh_layout}
+exec zellij -s {session} --layout {fresh_layout} --default-shell /bin/zsh
 "#,
             session = session_name,
             fresh_layout = fresh_layout.display(),

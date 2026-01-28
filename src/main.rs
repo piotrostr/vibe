@@ -13,6 +13,7 @@ mod terminal;
 mod ui;
 
 use app::App;
+use external::LinearClient;
 use storage::TaskStorage;
 use terminal::Terminal;
 
@@ -28,13 +29,17 @@ struct Cli {
 enum Command {
     /// Create a new task in the backlog
     Create {
-        /// Task title
+        /// Task title (keep short and unambiguous)
         #[arg(short, long)]
         title: String,
 
-        /// Task description
+        /// Task description (context, schedule, details)
         #[arg(short, long)]
         description: Option<String>,
+
+        /// Also create a self-assigned Linear issue (requires VIBE_KANBAN_LINEAR_API_KEY)
+        #[arg(short, long)]
+        linear: bool,
     },
 }
 
@@ -43,10 +48,38 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Create { title, description }) => {
+        Some(Command::Create {
+            title,
+            description,
+            linear,
+        }) => {
             let storage = TaskStorage::from_cwd()?;
-            let task = storage.create_task(&title, description.as_deref())?;
-            println!("Created task: {}", task.title);
+
+            if linear {
+                let api_key = std::env::var("VIBE_KANBAN_LINEAR_API_KEY")
+                    .map_err(|_| anyhow::anyhow!("VIBE_KANBAN_LINEAR_API_KEY not set"))?;
+
+                let client = LinearClient::new(api_key);
+                let created = client
+                    .create_issue(&title, description.as_deref())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Linear: {}", e))?;
+
+                // Create local task linked to Linear
+                let linear_issue = external::LinearIssue {
+                    identifier: created.identifier.clone(),
+                    title: title.clone(),
+                    description: description.clone(),
+                    url: created.url.clone(),
+                    labels: vec![],
+                };
+                let task = storage.create_task_from_linear(&linear_issue)?;
+                println!("Created: {} [{}]", task.title, created.identifier);
+                println!("  {}", created.url);
+            } else {
+                let task = storage.create_task(&title, description.as_deref())?;
+                println!("Created: {}", task.title);
+            }
             Ok(())
         }
         None => {

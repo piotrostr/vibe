@@ -37,7 +37,7 @@ enum Command {
         #[arg(short, long)]
         description: Option<String>,
 
-        /// Also create a self-assigned Linear issue (requires VIBE_KANBAN_LINEAR_API_KEY)
+        /// Also create a self-assigned Linear issue (requires {PROJECT}_LINEAR_API_KEY)
         #[arg(short, long)]
         linear: bool,
     },
@@ -56,8 +56,10 @@ async fn main() -> Result<()> {
             let storage = TaskStorage::from_cwd()?;
 
             if linear {
-                let api_key = std::env::var("VIBE_KANBAN_LINEAR_API_KEY")
-                    .map_err(|_| anyhow::anyhow!("VIBE_KANBAN_LINEAR_API_KEY not set"))?;
+                let project = storage.project_name().to_uppercase().replace('-', "_");
+                let env_var = format!("{}_LINEAR_API_KEY", project);
+                let api_key =
+                    std::env::var(&env_var).map_err(|_| anyhow::anyhow!("{} not set", env_var))?;
 
                 let client = LinearClient::new(api_key);
                 let created = client

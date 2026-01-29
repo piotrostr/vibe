@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::fs::OpenOptions;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -37,6 +38,11 @@ enum Command {
         #[arg(short, long)]
         description: Option<String>,
     },
+    /// Import a task from a markdown file
+    Import {
+        /// Path to markdown file (filename becomes title, contents become description)
+        file: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -72,6 +78,12 @@ async fn main() -> Result<()> {
                 let task = storage.create_task(&title, description.as_deref())?;
                 println!("Created: {}", task.title);
             }
+            Ok(())
+        }
+        Some(Command::Import { file }) => {
+            let storage = TaskStorage::from_cwd()?;
+            let task = storage.create_task_from_file(&file)?;
+            println!("Created: {}", task.title);
             Ok(())
         }
         None => {

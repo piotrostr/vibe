@@ -8,11 +8,13 @@ use std::path::PathBuf;
 use crate::external::{
     ActivityWatcher, BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader, LinearClient,
     LinearIssue, LinearIssueStatus, WorktreeInfo, ZellijSession, count_active_sessions,
-    edit_markdown, get_pr_for_branch, launch_zellij_claude_in_worktree,
+    edit_markdown, get_all_open_prs, get_pr_for_branch, launch_zellij_claude_in_worktree,
     launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
-use crate::state::{AppState, Modal, View, check_linear_api_key, linear_env_var_name};
+use crate::state::{
+    AppState, Modal, View, check_linear_api_key, linear_env_var_name, task_title_to_branch,
+};
 use crate::storage::TaskStorage;
 use crate::terminal::Terminal;
 use crate::ui::{
@@ -22,7 +24,7 @@ use crate::ui::{
 
 type WorktreeResult = Result<Vec<WorktreeInfo>, String>;
 type SessionResult = Result<Vec<ZellijSession>, String>;
-type BranchPrResult = (String, Option<BranchPrInfo>);
+type BatchPrResult = Result<std::collections::HashMap<String, BranchPrInfo>, String>;
 type LinearResult = Result<Vec<LinearIssue>, String>;
 type LinearStatusResult = Result<Vec<LinearIssueStatus>, String>;
 type PlanPresenceResult = (String, bool); // (task_id, has_plan)
@@ -41,8 +43,8 @@ pub struct App {
     worktree_sender: mpsc::Sender<WorktreeResult>,
     session_receiver: mpsc::Receiver<SessionResult>,
     session_sender: mpsc::Sender<SessionResult>,
-    pr_info_receiver: mpsc::Receiver<BranchPrResult>,
-    pr_info_sender: mpsc::Sender<BranchPrResult>,
+    pr_info_receiver: mpsc::Receiver<BatchPrResult>,
+    pr_info_sender: mpsc::Sender<BatchPrResult>,
     // Linear sync channels
     linear_receiver: mpsc::Receiver<LinearResult>,
     linear_sender: mpsc::Sender<LinearResult>,
@@ -82,7 +84,7 @@ impl App {
         // Create background loading channels
         let (worktree_sender, worktree_receiver) = mpsc::channel(4);
         let (session_sender, session_receiver) = mpsc::channel(4);
-        let (pr_info_sender, pr_info_receiver) = mpsc::channel(32);
+        let (pr_info_sender, pr_info_receiver) = mpsc::channel(4); // Reduced: batch results instead of per-branch
         let (linear_sender, linear_receiver) = mpsc::channel(4);
         let (linear_status_sender, linear_status_receiver) = mpsc::channel(4);
         let (activity_sender, activity_receiver) = mpsc::channel(32);
@@ -222,8 +224,8 @@ impl App {
     pub async fn run(&mut self, terminal: &mut Terminal) -> Result<()> {
         // Poll session status every 5 seconds
         const SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-        // Poll PR status every 30 seconds
-        const PR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+        // Poll PR status every 5 seconds (single batch query costs ~2 points, uses ~29% of rate limit)
+        const PR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
         // Tick animation every 200ms for smooth spinner
         const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -239,6 +241,7 @@ impl App {
 
             // Poll PR status periodically
             if self.last_pr_poll.elapsed() >= PR_POLL_INTERVAL {
+                tracing::debug!("Periodic PR poll triggered");
                 self.poll_pr_info_async();
                 self.last_pr_poll = std::time::Instant::now();
             }
@@ -270,8 +273,8 @@ impl App {
         while let Ok(result) = self.worktree_receiver.try_recv() {
             match result {
                 Ok(worktrees) => {
-                    // Spawn PR info fetch for each branch
-                    self.fetch_pr_info_for_branches(&worktrees);
+                    // Fetch PR info for all branches in a single batch query
+                    self.fetch_pr_info_batch();
                     self.state.worktrees.set_worktrees(worktrees);
                     self.state.worktrees.loading = false;
                     self.state.worktrees.error = None;
@@ -306,12 +309,26 @@ impl App {
             self.poll_claude_activity();
         }
 
-        // Non-blocking check for PR info results
-        while let Ok((branch, pr_info)) = self.pr_info_receiver.try_recv() {
-            if let Some(info) = pr_info {
-                self.state.worktrees.set_branch_pr(branch, info);
-            } else {
-                self.state.worktrees.clear_branch_pr(&branch);
+        // Non-blocking check for batch PR info results
+        while let Ok(result) = self.pr_info_receiver.try_recv() {
+            match result {
+                Ok(pr_map) => {
+                    // Clear PRs for branches not in the response (no longer have open PRs)
+                    let current_branches: Vec<_> =
+                        self.state.worktrees.branch_prs.keys().cloned().collect();
+                    for branch in current_branches {
+                        if !pr_map.contains_key(&branch) {
+                            self.state.worktrees.clear_branch_pr(&branch);
+                        }
+                    }
+                    // Update all PRs from batch result
+                    for (branch, pr_info) in pr_map {
+                        self.state.worktrees.set_branch_pr(branch, pr_info);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to fetch PR info: {}", e);
+                }
             }
         }
 
@@ -398,22 +415,83 @@ impl App {
         }
     }
 
-    fn fetch_pr_info_for_branches(&self, worktrees: &[WorktreeInfo]) {
-        for wt in worktrees {
-            // Skip main/master branches - they don't have PRs
-            if wt.branch == "main" || wt.branch == "master" {
-                continue;
+    fn fetch_pr_info_batch(&self) {
+        let sender = self.pr_info_sender.clone();
+        // Collect task branches to do targeted lookups for PRs not in batch
+        let task_branches: Vec<String> = self
+            .state
+            .tasks
+            .tasks
+            .iter()
+            .map(|t| task_title_to_branch(&t.title, t.linear_issue_id.as_deref()))
+            .collect();
+
+        tokio::task::spawn_blocking(move || {
+            let start = std::time::Instant::now();
+
+            let mut pr_map = match get_all_open_prs() {
+                Ok(map) => {
+                    tracing::info!(
+                        "Batch PR fetch: {} PRs in {:?}",
+                        map.len(),
+                        start.elapsed()
+                    );
+                    map
+                }
+                Err(e) => {
+                    tracing::error!("Batch PR fetch failed: {}", e);
+                    let _ = sender.blocking_send(Err(e.to_string()));
+                    return;
+                }
+            };
+
+            // Find branches that need targeted lookup
+            let missing_branches: Vec<_> = task_branches
+                .into_iter()
+                .filter(|b| !pr_map.contains_key(b))
+                .collect();
+
+            if !missing_branches.is_empty() {
+                tracing::info!(
+                    "Targeted PR lookup for {} branches not in batch",
+                    missing_branches.len()
+                );
+
+                let lookup_start = std::time::Instant::now();
+
+                // Parallel lookups using thread scope
+                let results: Vec<_> = std::thread::scope(|s| {
+                    missing_branches
+                        .iter()
+                        .map(|branch| {
+                            let branch = branch.clone();
+                            s.spawn(move || (branch.clone(), get_pr_for_branch(&branch)))
+                        })
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .map(|handle| handle.join().unwrap())
+                        .collect()
+                });
+
+                let mut found = 0;
+                for (branch, result) in results {
+                    if let Ok(Some(pr_info)) = result {
+                        pr_map.insert(branch, pr_info);
+                        found += 1;
+                    }
+                }
+
+                tracing::info!(
+                    "Targeted lookup: found {}/{} PRs in {:?}",
+                    found,
+                    missing_branches.len(),
+                    lookup_start.elapsed()
+                );
             }
 
-            let branch = wt.branch.clone();
-            let sender = self.pr_info_sender.clone();
-
-            tokio::task::spawn_blocking(move || {
-                let result = get_pr_for_branch(&branch);
-                let pr_info = result.ok().flatten();
-                let _ = sender.blocking_send((branch, pr_info));
-            });
-        }
+            tracing::info!("Total PR fetch: {} PRs in {:?}", pr_map.len(), start.elapsed());
+            let _ = sender.blocking_send(Ok(pr_map));
+        });
     }
 
     fn render(&mut self, terminal: &mut Terminal) -> Result<()> {
@@ -720,14 +798,17 @@ impl App {
                 self.state.selected_task_id = None;
                 self.state.selected_task_plan = None;
                 self.state.view = View::Kanban;
+                self.refetch_on_kanban_mount();
             }
             View::Worktrees | View::Logs => {
                 self.state.view = View::Kanban;
+                self.refetch_on_kanban_mount();
             }
             View::Search => {
                 self.state.search.clear();
                 self.state.search_active = false;
                 self.state.view = View::Kanban;
+                self.refetch_on_kanban_mount();
             }
         }
     }
@@ -1124,9 +1205,18 @@ impl App {
     }
 
     fn poll_pr_info_async(&mut self) {
-        // Re-fetch PR info for all known worktree branches
-        let worktrees = self.state.worktrees.worktrees.clone();
-        self.fetch_pr_info_for_branches(&worktrees);
+        // Fetch PR info for all open PRs in a single batch query
+        self.fetch_pr_info_batch();
+    }
+
+    /// Trigger immediate refetch of PR and session info, resetting poll timers.
+    /// Call this when returning to the Kanban view (similar to TanStack Query's refetchOnMount).
+    fn refetch_on_kanban_mount(&mut self) {
+        tracing::info!("Refetch on kanban mount triggered");
+        self.poll_pr_info_async();
+        self.poll_sessions_async();
+        self.last_pr_poll = std::time::Instant::now();
+        self.last_session_poll = std::time::Instant::now();
     }
 
     fn poll_claude_activity(&mut self) {
@@ -1204,6 +1294,8 @@ impl App {
                     if let Err(e) = result {
                         tracing::error!("Failed to launch session: {}", e);
                     }
+                    // Refetch after returning from session
+                    self.refetch_on_kanban_mount();
                     return Ok(());
                 }
                 return Ok(());
@@ -1254,12 +1346,15 @@ impl App {
             tracing::error!("Failed to launch session: {}", e);
         }
 
-        // After returning from session, go back to kanban board
+        // After returning from session, go back to kanban board and refetch
         if self.state.view == View::TaskDetail {
             self.state.selected_task_id = None;
             self.state.selected_task_plan = None;
             self.state.view = View::Kanban;
         }
+
+        // Always refetch after returning from a session - PR state may have changed
+        self.refetch_on_kanban_mount();
 
         Ok(())
     }
@@ -1303,55 +1398,5 @@ impl App {
             tracing::warn!("No plan available for this task");
         }
         Ok(())
-    }
-}
-
-/// Convert task title to a branch name slug.
-/// If linear_id is provided, prefixes the branch name with it (e.g., "AMB-67/add-feature").
-fn task_title_to_branch(title: &str, linear_id: Option<&str>) -> String {
-    let slug = title
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-
-    match linear_id {
-        Some(id) => format!("{}/{}", id, slug),
-        None => slug,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_task_title_to_branch_without_linear_id() {
-        assert_eq!(task_title_to_branch("Hello World", None), "hello-world");
-        assert_eq!(
-            task_title_to_branch("Add feature: user auth", None),
-            "add-feature-user-auth"
-        );
-        assert_eq!(task_title_to_branch("Fix bug #123", None), "fix-bug-123");
-        assert_eq!(
-            task_title_to_branch("  Multiple   Spaces  ", None),
-            "multiple-spaces"
-        );
-    }
-
-    #[test]
-    fn test_task_title_to_branch_with_linear_id() {
-        assert_eq!(
-            task_title_to_branch("Add some feature", Some("AMB-67")),
-            "AMB-67/add-some-feature"
-        );
-        assert_eq!(
-            task_title_to_branch("Fix the bug", Some("TEAM-123")),
-            "TEAM-123/fix-the-bug"
-        );
     }
 }

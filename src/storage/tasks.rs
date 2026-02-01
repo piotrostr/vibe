@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::external::LinearIssue;
 use crate::state::{Task, TaskStatus};
@@ -29,16 +29,51 @@ pub struct TaskFrontmatter {
 }
 
 impl TaskStorage {
-    /// Create storage for the current working directory's project
+    /// Create storage for the current working directory's project.
+    /// If in a git worktree, resolves to the main repository's project name.
     pub fn from_cwd() -> Result<Self> {
-        let cwd = std::env::current_dir().context("Failed to get current directory")?;
-        let project_name = cwd
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid directory name"))?
-            .to_string();
-
+        let project_name = Self::resolve_project_name()?;
         Self::new(&project_name)
+    }
+
+    /// Resolve project name, handling git worktrees.
+    /// Uses `git rev-parse --git-common-dir` to find the main repo.
+    fn resolve_project_name() -> Result<String> {
+        let cwd = std::env::current_dir().context("Failed to get current directory")?;
+
+        // Try to get the git common directory (shared across worktrees)
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "--git-common-dir"])
+            .output();
+
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let git_common_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let git_path = std::path::Path::new(&git_common_dir);
+
+            // The parent of .git is the main repo directory
+            if let Some(repo_root) = git_path.parent() {
+                // Handle both absolute and relative paths
+                let repo_root = if repo_root.is_absolute() {
+                    repo_root.to_path_buf()
+                } else {
+                    cwd.join(repo_root)
+                        .canonicalize()
+                        .unwrap_or_else(|_| cwd.clone())
+                };
+
+                if let Some(name) = repo_root.file_name().and_then(|s| s.to_str()) {
+                    return Ok(name.to_string());
+                }
+            }
+        }
+
+        // Fallback to current directory name
+        cwd.file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow::anyhow!("Invalid directory name"))
     }
 
     /// Create storage for a specific project name
@@ -52,6 +87,16 @@ impl TaskStorage {
         std::fs::create_dir_all(&tasks_dir)
             .with_context(|| format!("Failed to create tasks directory: {:?}", tasks_dir))?;
 
+        Ok(Self {
+            tasks_dir,
+            project_name: project_name.to_string(),
+        })
+    }
+
+    #[cfg(test)]
+    pub fn new_with_base(base_dir: &Path, project_name: &str) -> Result<Self> {
+        let tasks_dir = base_dir.join("projects").join(project_name).join("tasks");
+        std::fs::create_dir_all(&tasks_dir)?;
         Ok(Self {
             tasks_dir,
             project_name: project_name.to_string(),
@@ -210,6 +255,27 @@ impl TaskStorage {
             pr_checks_status: None,
             pr_has_conflicts: None,
         })
+    }
+
+    /// Create a task from a markdown file
+    /// Filename (minus extension) becomes title, contents become description
+    pub fn create_task_from_file(&self, path: &Path) -> Result<Task> {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read file: {:?}", path))?;
+
+        let slug = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| anyhow::anyhow!("Invalid file name"))?;
+
+        let title = unslugify(slug);
+        let description = if content.trim().is_empty() {
+            None
+        } else {
+            Some(content)
+        };
+
+        self.create_task(&title, description.as_deref())
     }
 
     /// Update an existing task
@@ -386,6 +452,11 @@ fn slugify(title: &str) -> String {
         .join("-")
 }
 
+/// Convert a slug back to a title (inverse of slugify)
+fn unslugify(slug: &str) -> String {
+    slug.replace('-', " ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +467,39 @@ mod tests {
         assert_eq!(slugify("Add feature: user auth"), "add-feature-user-auth");
         assert_eq!(slugify("Fix bug #123"), "fix-bug-123");
         assert_eq!(slugify("  Spaces  everywhere  "), "spaces-everywhere");
+    }
+
+    #[test]
+    fn test_unslugify() {
+        assert_eq!(unslugify("task-name"), "task name");
+        assert_eq!(unslugify("hello-world-test"), "hello world test");
+        assert_eq!(unslugify("single"), "single");
+    }
+
+    #[test]
+    fn test_create_task_from_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = TaskStorage::new_with_base(dir.path(), "test-project").unwrap();
+
+        let file_path = dir.path().join("my-new-task.md");
+        std::fs::write(&file_path, "Task description here").unwrap();
+
+        let task = storage.create_task_from_file(&file_path).unwrap();
+        assert_eq!(task.title, "my new task");
+        assert_eq!(task.description, Some("Task description here".to_string()));
+    }
+
+    #[test]
+    fn test_create_task_from_file_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = TaskStorage::new_with_base(dir.path(), "test-project").unwrap();
+
+        let file_path = dir.path().join("empty-task.md");
+        std::fs::write(&file_path, "").unwrap();
+
+        let task = storage.create_task_from_file(&file_path).unwrap();
+        assert_eq!(task.title, "empty task");
+        assert!(task.description.is_none());
     }
 
     #[test]

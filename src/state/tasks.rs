@@ -1,5 +1,24 @@
 use serde::{Deserialize, Serialize};
 
+/// Convert task title to a branch name slug.
+/// If linear_id is provided, prefixes the branch name with it (e.g., "AMB-67/add-feature").
+pub fn task_title_to_branch(title: &str, linear_id: Option<&str>) -> String {
+    let slug = title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+
+    match linear_id {
+        Some(id) => format!("{}/{}", id, slug),
+        None => slug,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskStatus {
@@ -118,11 +137,7 @@ impl Task {
         has_worktree: bool,
         linear_status: Option<&LinearIssueStatus>,
     ) -> TaskStatus {
-        // Priority 1: PR status (merged/closed/open) - concrete git state
-        if self.pr_status.is_some() {
-            return self.effective_status();
-        }
-
+        // Priority 1: Live fetched PR status (most accurate, up-to-date)
         if let Some(pr) = branch_pr {
             match pr.state.as_str() {
                 "MERGED" => return TaskStatus::Done,
@@ -139,7 +154,12 @@ impl Task {
             }
         }
 
-        // Priority 2: Linear terminal states (completed/cancelled) override worktree
+        // Priority 2: Stored PR status (fallback if no live data)
+        if self.pr_status.is_some() {
+            return self.effective_status();
+        }
+
+        // Priority 3: Linear terminal states (completed/cancelled) override worktree
         if let Some(linear) = linear_status {
             match linear.state_type.as_str() {
                 "completed" => return TaskStatus::Done,
@@ -148,17 +168,17 @@ impl Task {
             }
         }
 
-        // Priority 3: Worktree presence upgrades backlog/unstarted to in-progress
+        // Priority 4: Worktree presence upgrades backlog/unstarted to in-progress
         if has_worktree {
             return TaskStatus::Inprogress;
         }
 
-        // Priority 4: Linear non-terminal status
+        // Priority 5: Linear non-terminal status
         if let Some(linear) = linear_status {
             return TaskStatus::from_linear_state_type(&linear.state_type);
         }
 
-        // Priority 5: Local stored status - fallback
+        // Priority 6: Local stored status - fallback
         self.status
     }
 }
@@ -198,14 +218,44 @@ impl TasksState {
         self.tasks
             .iter()
             .filter(|t| {
-                let task_slug = t.title.to_lowercase().replace(' ', "-");
+                // Use the same branch derivation as session launch
+                let expected_branch = task_title_to_branch(&t.title, t.linear_issue_id.as_deref());
+
+                // Try to find matching worktree
                 let matching_branch = worktrees.iter().find(|w| {
-                    w.branch.to_lowercase().contains(&task_slug)
-                        || task_slug.contains(&w.branch.to_lowercase())
+                    w.branch == expected_branch
+                        || w.branch
+                            .to_lowercase()
+                            .contains(&expected_branch.to_lowercase())
+                        || expected_branch
+                            .to_lowercase()
+                            .contains(&w.branch.to_lowercase())
                 });
 
                 let has_worktree = matching_branch.is_some();
-                let branch_pr = matching_branch.and_then(|wt| branch_prs.get(&wt.branch));
+
+                // Try to find PR info:
+                // 1. First via worktree branch name
+                // 2. Then via expected branch name (for merged PRs where worktree is deleted)
+                // 3. Then search branch_prs for any branch containing the task slug
+                let branch_pr = matching_branch
+                    .and_then(|wt| branch_prs.get(&wt.branch))
+                    .or_else(|| branch_prs.get(&expected_branch))
+                    .or_else(|| {
+                        // Fallback: search for any PR branch that matches the task slug
+                        let task_slug = t.title.to_lowercase().replace(' ', "-");
+                        branch_prs.iter().find_map(|(branch, pr)| {
+                            let branch_lower = branch.to_lowercase();
+                            if branch_lower.contains(&task_slug)
+                                || task_slug.contains(&branch_lower)
+                            {
+                                Some(pr)
+                            } else {
+                                None
+                            }
+                        })
+                    });
+
                 let linear_status = t
                     .linear_issue_id
                     .as_ref()
@@ -559,5 +609,82 @@ mod tests {
             task.effective_status_with_pr(None, true, Some(&linear_unstarted)),
             TaskStatus::Inprogress
         );
+    }
+
+    #[test]
+    fn test_task_title_to_branch_without_linear_id() {
+        assert_eq!(task_title_to_branch("Hello World", None), "hello-world");
+        assert_eq!(
+            task_title_to_branch("Add feature: user auth", None),
+            "add-feature-user-auth"
+        );
+        assert_eq!(task_title_to_branch("Fix bug #123", None), "fix-bug-123");
+        assert_eq!(
+            task_title_to_branch("  Multiple   Spaces  ", None),
+            "multiple-spaces"
+        );
+    }
+
+    #[test]
+    fn test_task_title_to_branch_with_linear_id() {
+        assert_eq!(
+            task_title_to_branch("Add some feature", Some("AMB-67")),
+            "AMB-67/add-some-feature"
+        );
+        assert_eq!(
+            task_title_to_branch("Fix the bug", Some("TEAM-123")),
+            "TEAM-123/fix-the-bug"
+        );
+    }
+
+    #[test]
+    fn test_merged_pr_found_without_worktree() {
+        use std::collections::HashMap;
+
+        let mut state = TasksState::new();
+
+        // Task with matching branch name
+        let mut task = make_task(TaskStatus::Inprogress);
+        task.id = "task1".to_string();
+        task.title = "batch pr status queries".to_string();
+
+        state.set_tasks(vec![task]);
+
+        // PR exists for the branch (MERGED), but no worktree
+        let mut branch_prs = HashMap::new();
+        branch_prs.insert(
+            "batch-pr-status-queries".to_string(),
+            BranchPrInfo {
+                _number: 12,
+                url: "https://github.com/test/repo/pull/12".to_string(),
+                state: "MERGED".to_string(),
+                is_draft: false,
+                review_decision: None,
+                status_check_rollup: None,
+                mergeable: None,
+                reviews: vec![],
+            },
+        );
+
+        let empty_wt: Vec<crate::external::WorktreeInfo> = vec![];
+        let empty_linear: HashMap<String, LinearIssueStatus> = HashMap::new();
+
+        // Task should appear in Done column (not In Progress) due to merged PR
+        let in_progress = state.tasks_in_column_with_prs(
+            TaskStatus::Inprogress,
+            &branch_prs,
+            &empty_wt,
+            &empty_linear,
+        );
+        assert_eq!(
+            in_progress.len(),
+            0,
+            "Merged PR task should not be in In Progress"
+        );
+
+        let done =
+            state.tasks_in_column_with_prs(TaskStatus::Done, &branch_prs, &empty_wt, &empty_linear);
+        assert_eq!(done.len(), 1, "Merged PR task should be in Done");
+        assert_eq!(done[0].id, "task1");
     }
 }

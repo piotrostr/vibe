@@ -64,6 +64,13 @@ struct LabelNode {
     name: String,
 }
 
+/// Result of creating an issue
+#[derive(Debug, Clone)]
+pub struct CreatedIssue {
+    pub identifier: String,
+    pub url: String,
+}
+
 pub struct LinearClient {
     http: Client,
     api_key: String,
@@ -77,6 +84,138 @@ impl LinearClient {
             http: Client::new(),
             api_key,
         }
+    }
+
+    /// Get the current user's ID
+    async fn get_viewer_id(&self) -> Result<String, String> {
+        let query = r#"query { viewer { id } }"#;
+        let body = serde_json::json!({ "query": query });
+
+        let response = self
+            .http
+            .post(Self::API_URL)
+            .header("Authorization", &self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?;
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("JSON parse error: {}", e))?;
+
+        json.get("data")
+            .and_then(|d| d.get("viewer"))
+            .and_then(|v| v.get("id"))
+            .and_then(|id| id.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "Failed to get viewer ID".to_string())
+    }
+
+    /// Get the user's default team ID (first team they belong to)
+    async fn get_default_team_id(&self) -> Result<String, String> {
+        let query = r#"query { teams { nodes { id name } } }"#;
+        let body = serde_json::json!({ "query": query });
+
+        let response = self
+            .http
+            .post(Self::API_URL)
+            .header("Authorization", &self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?;
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("JSON parse error: {}", e))?;
+
+        json.get("data")
+            .and_then(|d| d.get("teams"))
+            .and_then(|t| t.get("nodes"))
+            .and_then(|n| n.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|team| team.get("id"))
+            .and_then(|id| id.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "No teams found".to_string())
+    }
+
+    /// Create a new issue assigned to self in the backlog
+    pub async fn create_issue(
+        &self,
+        title: &str,
+        description: Option<&str>,
+    ) -> Result<CreatedIssue, String> {
+        let viewer_id = self.get_viewer_id().await?;
+        let team_id = self.get_default_team_id().await?;
+
+        let desc_value = description
+            .map(|d| format!(r#""{}""#, d.replace('"', "\\\"")))
+            .unwrap_or_else(|| "null".to_string());
+
+        let query = format!(
+            r#"mutation {{
+                issueCreate(input: {{
+                    title: "{}",
+                    description: {},
+                    teamId: "{}",
+                    assigneeId: "{}"
+                }}) {{
+                    success
+                    issue {{
+                        identifier
+                        url
+                    }}
+                }}
+            }}"#,
+            title.replace('"', "\\\""),
+            desc_value,
+            team_id,
+            viewer_id
+        );
+
+        let body = serde_json::json!({ "query": query });
+
+        let response = self
+            .http
+            .post(Self::API_URL)
+            .header("Authorization", &self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?;
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("JSON parse error: {}", e))?;
+
+        if let Some(errors) = json.get("errors") {
+            return Err(format!("GraphQL error: {}", errors));
+        }
+
+        let issue = json
+            .get("data")
+            .and_then(|d| d.get("issueCreate"))
+            .and_then(|ic| ic.get("issue"))
+            .ok_or("Failed to create issue")?;
+
+        let identifier = issue
+            .get("identifier")
+            .and_then(|i| i.as_str())
+            .ok_or("Missing identifier")?
+            .to_string();
+
+        let url = issue
+            .get("url")
+            .and_then(|u| u.as_str())
+            .ok_or("Missing url")?
+            .to_string();
+
+        Ok(CreatedIssue { identifier, url })
     }
 
     /// Fetch backlog issues assigned to the current user (API key owner)

@@ -37,3 +37,11 @@ fmt:
 # Run migration tool
 migrate:
     cargo run --bin vibe-migrate
+
+# Setup worktree with prebuild
+setup:
+    cargo build
+
+# Teardown worktree - clean build artifacts
+teardown:
+    cargo clean

@@ -1,5 +1,7 @@
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use std::fs::OpenOptions;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -12,27 +14,97 @@ mod terminal;
 mod ui;
 
 use app::App;
+use external::LinearClient;
+use storage::TaskStorage;
 use terminal::Terminal;
+
+#[derive(Parser)]
+#[command(name = "vibe")]
+#[command(about = "Terminal-based kanban board for managing Claude Code sessions")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Create a new task in the backlog
+    Create {
+        /// Task title (keep short and unambiguous)
+        #[arg(short, long)]
+        title: String,
+
+        /// Task description (context, schedule, details)
+        #[arg(short, long)]
+        description: Option<String>,
+    },
+    /// Import a task from a markdown file
+    Import {
+        /// Path to markdown file (filename becomes title, contents become description)
+        file: PathBuf,
+    },
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing()?;
+    let cli = Cli::parse();
 
-    let mut terminal = Terminal::new()?;
-    let mut app = App::new()?;
+    match cli.command {
+        Some(Command::Create { title, description }) => {
+            let storage = TaskStorage::from_cwd()?;
 
-    let result = app.run(&mut terminal).await;
+            // Check for project-specific Linear API key
+            let project = storage.project_name().to_uppercase().replace('-', "_");
+            let env_var = format!("{}_LINEAR_API_KEY", project);
 
-    terminal.restore()?;
+            if let Ok(api_key) = std::env::var(&env_var) {
+                let client = LinearClient::new(api_key);
+                let created = client
+                    .create_issue(&title, description.as_deref())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Linear: {}", e))?;
 
-    result
+                let linear_issue = external::LinearIssue {
+                    identifier: created.identifier.clone(),
+                    title: title.clone(),
+                    description: description.clone(),
+                    url: created.url.clone(),
+                    labels: vec![],
+                };
+                let task = storage.create_task_from_linear(&linear_issue)?;
+                println!("Created: {} [{}]", task.title, created.identifier);
+                println!("  {}", created.url);
+            } else {
+                let task = storage.create_task(&title, description.as_deref())?;
+                println!("Created: {}", task.title);
+            }
+            Ok(())
+        }
+        Some(Command::Import { file }) => {
+            let storage = TaskStorage::from_cwd()?;
+            let task = storage.create_task_from_file(&file)?;
+            println!("Created: {}", task.title);
+            Ok(())
+        }
+        None => {
+            init_tracing()?;
+
+            let mut terminal = Terminal::new()?;
+            let mut app = App::new()?;
+
+            let result = app.run(&mut terminal).await;
+
+            terminal.restore()?;
+
+            result
+        }
+    }
 }
 
 fn init_tracing() -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,tui=info"));
 
-    // Write logs to file instead of stderr to avoid breaking TUI
     let log_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".vibe");

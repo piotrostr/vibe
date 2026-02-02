@@ -67,7 +67,7 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
 
         // Add status info on the right side of the first few lines
         if i == 0 {
-            // Line 1: Process counts
+            // Line 1: Process counts + loading indicator
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
                 format!("Claude: {}", claude_count),
@@ -86,6 +86,14 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
                     Color::DarkGray
                 }),
             ));
+            // Show loading indicator when refreshing
+            if state.pr_loading || state.worktrees.loading || state.sessions.loading {
+                spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    format!("{} syncing", state.spinner_char()),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
         } else if i == 1 && !project_info.is_empty() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(

@@ -77,6 +77,9 @@ pub struct AppState {
 
     /// Cached count of running Claude processes
     pub claude_process_count: usize,
+
+    /// True when PR info is being fetched in the background
+    pub pr_loading: bool,
 }
 
 impl AppState {
@@ -119,6 +122,8 @@ impl AppState {
             command_input: None,
 
             claude_process_count: 0,
+
+            pr_loading: false,
         }
     }
 

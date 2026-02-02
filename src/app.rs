@@ -312,6 +312,7 @@ impl App {
 
         // Non-blocking check for batch PR info results
         while let Ok(result) = self.pr_info_receiver.try_recv() {
+            self.state.pr_loading = false;
             match result {
                 Ok(pr_map) => {
                     // Clear PRs for branches not in the response (no longer have open PRs)
@@ -423,7 +424,8 @@ impl App {
         }
     }
 
-    fn fetch_pr_info_batch(&self) {
+    fn fetch_pr_info_batch(&mut self) {
+        self.state.pr_loading = true;
         let sender = self.pr_info_sender.clone();
 
         // Only do targeted lookups for branches that:

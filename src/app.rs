@@ -224,8 +224,9 @@ impl App {
     pub async fn run(&mut self, terminal: &mut Terminal) -> Result<()> {
         // Poll session status every 5 seconds
         const SESSION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
-        // Poll PR status every 5 seconds (single batch query costs ~2 points, uses ~29% of rate limit)
-        const PR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+        // Poll PR status every 15 seconds (batch query + limited targeted lookups)
+        // Reduced frequency to avoid rate limits with many tasks
+        const PR_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
         // Tick animation every 200ms for smooth spinner
         const ANIMATION_TICK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -323,8 +324,15 @@ impl App {
                     }
                     // Update all PRs from batch result
                     for (branch, pr_info) in pr_map {
-                        self.state.worktrees.set_branch_pr(branch, pr_info);
+                        // Handle __NO_PR__ sentinel markers
+                        if let Some(real_branch) = branch.strip_prefix("__NO_PR__:") {
+                            self.state.worktrees.mark_no_pr(real_branch.to_string());
+                        } else {
+                            self.state.worktrees.set_branch_pr(branch, pr_info);
+                        }
                     }
+                    // Cleanup expired no-PR cache entries periodically
+                    self.state.worktrees.cleanup_no_pr_cache();
                 }
                 Err(e) => {
                     tracing::error!("Failed to fetch PR info: {}", e);
@@ -417,13 +425,18 @@ impl App {
 
     fn fetch_pr_info_batch(&self) {
         let sender = self.pr_info_sender.clone();
-        // Collect task branches to do targeted lookups for PRs not in batch
-        let task_branches: Vec<String> = self
-            .state
-            .tasks
-            .tasks
-            .iter()
-            .map(|t| task_title_to_branch(&t.title, t.linear_issue_id.as_deref()))
+
+        // Only do targeted lookups for branches that:
+        // 1. Have a worktree (no worktree = unlikely to have PR)
+        // 2. Aren't already in PR map
+        // 3. Aren't in the "no PR" cache (recently checked, no PR found)
+        let branches_to_lookup = self.state.worktrees.branches_needing_pr_lookup();
+
+        // Rate limit: max 10 targeted lookups per cycle to avoid rate limits
+        const MAX_TARGETED_LOOKUPS: usize = 10;
+        let limited_branches: Vec<_> = branches_to_lookup
+            .into_iter()
+            .take(MAX_TARGETED_LOOKUPS)
             .collect();
 
         tokio::task::spawn_blocking(move || {
@@ -445,15 +458,15 @@ impl App {
                 }
             };
 
-            // Find branches that need targeted lookup
-            let missing_branches: Vec<_> = task_branches
+            // Find branches that need targeted lookup (not in batch response)
+            let missing_branches: Vec<_> = limited_branches
                 .into_iter()
                 .filter(|b| !pr_map.contains_key(b))
                 .collect();
 
             if !missing_branches.is_empty() {
                 tracing::info!(
-                    "Targeted PR lookup for {} branches not in batch",
+                    "Targeted PR lookup for {} branches (rate limited)",
                     missing_branches.len()
                 );
 
@@ -474,11 +487,40 @@ impl App {
                 });
 
                 let mut found = 0;
+                let mut no_pr_branches = Vec::new();
                 for (branch, result) in results {
-                    if let Ok(Some(pr_info)) = result {
-                        pr_map.insert(branch, pr_info);
-                        found += 1;
+                    match result {
+                        Ok(Some(pr_info)) => {
+                            pr_map.insert(branch, pr_info);
+                            found += 1;
+                        }
+                        Ok(None) => {
+                            // No PR for this branch - mark for caching
+                            no_pr_branches.push(branch);
+                        }
+                        Err(e) => {
+                            tracing::warn!("PR lookup failed for branch: {}", e);
+                        }
                     }
+                }
+
+                // Store branches with no PR in the result map with a sentinel value
+                // We'll handle this in the receiver to update the no-PR cache
+                for branch in no_pr_branches {
+                    // Use a special marker - we'll use a closed PR with special URL
+                    pr_map.insert(
+                        format!("__NO_PR__:{}", branch),
+                        crate::external::BranchPrInfo {
+                            _number: 0,
+                            url: String::new(),
+                            state: "NO_PR".to_string(),
+                            is_draft: false,
+                            review_decision: None,
+                            status_check_rollup: None,
+                            mergeable: None,
+                            reviews: vec![],
+                        },
+                    );
                 }
 
                 tracing::info!(
@@ -1003,9 +1045,17 @@ impl App {
                 self.refresh_linear();
                 // Refresh plan presence
                 self.poll_plan_presence();
+                // Force PR refresh (clear no-PR cache for full refresh)
+                self.state.worktrees.clear_no_pr_cache();
+                self.poll_pr_info_async();
+                // Refresh worktrees too
+                self.load_worktrees();
             }
             View::Worktrees => {
                 self.load_worktrees();
+                // Also refresh PRs when viewing worktrees
+                self.state.worktrees.clear_no_pr_cache();
+                self.poll_pr_info_async();
             }
             View::Logs => {
                 self.state.logs.refresh();

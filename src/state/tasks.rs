@@ -137,48 +137,53 @@ impl Task {
         has_worktree: bool,
         linear_status: Option<&LinearIssueStatus>,
     ) -> TaskStatus {
-        // Priority 1: Live fetched PR status (most accurate, up-to-date)
-        if let Some(pr) = branch_pr {
-            match pr.state.as_str() {
-                "MERGED" => return TaskStatus::Done,
-                "CLOSED" => return TaskStatus::Cancelled,
-                "OPEN" => {
-                    if !pr.is_draft {
-                        return TaskStatus::Inreview;
-                    }
-                    if has_worktree {
-                        return TaskStatus::Inprogress;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Priority 2: Stored PR status (fallback if no live data)
-        if self.pr_status.is_some() {
-            return self.effective_status();
-        }
-
-        // Priority 3: Linear terminal states (completed/cancelled) override worktree
+        // Priority 1: Linear status is the source of truth (GitHub integration keeps it current)
         if let Some(linear) = linear_status {
             match linear.state_type.as_str() {
                 "completed" => return TaskStatus::Done,
                 "canceled" => return TaskStatus::Cancelled,
+                "started" => {
+                    // "started" in Linear covers both In Progress and In Review.
+                    // If we have a non-draft open PR, it's In Review.
+                    if let Some(pr) = branch_pr
+                        && pr.state == "OPEN"
+                        && !pr.is_draft
+                    {
+                        return TaskStatus::Inreview;
+                    }
+                    return TaskStatus::Inprogress;
+                }
+                _ => {} // backlog/unstarted fall through
+            }
+        }
+
+        // Priority 2: PR status for non-Linear tasks
+        if let Some(pr) = branch_pr {
+            match pr.state.as_str() {
+                "MERGED" => return TaskStatus::Done,
+                "CLOSED" => return TaskStatus::Cancelled,
+                "OPEN" if !pr.is_draft => return TaskStatus::Inreview,
+                "OPEN" => return TaskStatus::Inprogress,
                 _ => {}
             }
         }
 
-        // Priority 4: Worktree presence upgrades backlog/unstarted to in-progress
+        // Priority 3: Stored PR status (legacy fallback)
+        if self.pr_status.is_some() {
+            return self.effective_status();
+        }
+
+        // Priority 4: Worktree presence upgrades to in-progress
         if has_worktree {
             return TaskStatus::Inprogress;
         }
 
-        // Priority 5: Linear non-terminal status
+        // Priority 5: Linear non-terminal status (backlog/unstarted)
         if let Some(linear) = linear_status {
             return TaskStatus::from_linear_state_type(&linear.state_type);
         }
 
-        // Priority 6: Local stored status - fallback
+        // Priority 6: Local stored status
         self.status
     }
 }
@@ -552,6 +557,56 @@ mod tests {
         assert_eq!(
             task.effective_status_with_pr(None, false, Some(&linear_done)),
             TaskStatus::Done
+        );
+    }
+
+    #[test]
+    fn test_linear_started_with_pr_is_inreview() {
+        let mut task = make_task(TaskStatus::Backlog);
+        task.linear_issue_id = Some("VIB-6".to_string());
+
+        let linear_started = LinearIssueStatus {
+            identifier: "VIB-6".to_string(),
+            state_type: "started".to_string(),
+            state_name: "In Progress".to_string(),
+        };
+
+        // Linear "started" + open non-draft PR = In Review
+        let open_pr = BranchPrInfo {
+            _number: 1,
+            url: "https://github.com/test/repo/pull/1".to_string(),
+            state: "OPEN".to_string(),
+            is_draft: false,
+            review_decision: None,
+            status_check_rollup: None,
+            mergeable: None,
+            reviews: vec![],
+        };
+        assert_eq!(
+            task.effective_status_with_pr(Some(&open_pr), true, Some(&linear_started)),
+            TaskStatus::Inreview
+        );
+
+        // Linear "started" + draft PR = In Progress (not review)
+        let draft_pr = BranchPrInfo {
+            _number: 1,
+            url: "https://github.com/test/repo/pull/1".to_string(),
+            state: "OPEN".to_string(),
+            is_draft: true,
+            review_decision: None,
+            status_check_rollup: None,
+            mergeable: None,
+            reviews: vec![],
+        };
+        assert_eq!(
+            task.effective_status_with_pr(Some(&draft_pr), true, Some(&linear_started)),
+            TaskStatus::Inprogress
+        );
+
+        // Linear "started" + no PR = In Progress
+        assert_eq!(
+            task.effective_status_with_pr(None, true, Some(&linear_started)),
+            TaskStatus::Inprogress
         );
     }
 

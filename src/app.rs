@@ -446,11 +446,7 @@ impl App {
 
             let mut pr_map = match get_all_open_prs() {
                 Ok(map) => {
-                    tracing::info!(
-                        "Batch PR fetch: {} PRs in {:?}",
-                        map.len(),
-                        start.elapsed()
-                    );
+                    tracing::info!("Batch PR fetch: {} PRs in {:?}", map.len(), start.elapsed());
                     map
                 }
                 Err(e) => {
@@ -533,7 +529,11 @@ impl App {
                 );
             }
 
-            tracing::info!("Total PR fetch: {} PRs in {:?}", pr_map.len(), start.elapsed());
+            tracing::info!(
+                "Total PR fetch: {} PRs in {:?}",
+                pr_map.len(),
+                start.elapsed()
+            );
             let _ = sender.blocking_send(Ok(pr_map));
         });
     }

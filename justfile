@@ -38,6 +38,18 @@ fmt:
 migrate:
     cargo run --bin vibe-migrate
 
+# Gas a Linear ticket - fetch, create worktree, launch Claude
+gas identifier:
+    cargo run --bin vibe -- gas {{identifier}}
+
+# Gas a Linear ticket in plan mode
+gas-plan identifier:
+    cargo run --bin vibe -- gas --plan {{identifier}}
+
+# Watch Linear for ~gasit tickets and auto-gas them
+watch:
+    cargo run --bin vibe -- watch
+
 # Setup worktree with prebuild
 setup:
     cargo build

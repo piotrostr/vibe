@@ -218,6 +218,100 @@ impl LinearClient {
         Ok(CreatedIssue { identifier, url })
     }
 
+    /// Fetch a single issue by its human-readable identifier (e.g. "AMB-123")
+    pub async fn fetch_issue_by_identifier(&self, identifier: &str) -> Result<LinearIssue, String> {
+        let query = r#"
+            query($id: String!) {
+                issue(id: $id) {
+                    identifier
+                    title
+                    description
+                    url
+                    labels {
+                        nodes {
+                            name
+                        }
+                    }
+                }
+            }
+        "#;
+
+        let body = serde_json::json!({
+            "query": query,
+            "variables": { "id": identifier }
+        });
+
+        let response = self
+            .http
+            .post(Self::API_URL)
+            .header("Authorization", &self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                text.chars().take(200).collect::<String>()
+            ));
+        }
+
+        let json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("JSON parse error: {}", e))?;
+
+        if let Some(errors) = json.get("errors") {
+            return Err(format!("GraphQL error: {}", errors));
+        }
+
+        let issue = json
+            .get("data")
+            .and_then(|d| d.get("issue"))
+            .ok_or_else(|| format!("Issue {} not found", identifier))?;
+
+        if issue.is_null() {
+            return Err(format!("Issue {} not found", identifier));
+        }
+
+        Ok(LinearIssue {
+            identifier: issue
+                .get("identifier")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            title: issue
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            description: issue
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            url: issue
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            labels: issue
+                .get("labels")
+                .and_then(|l| l.get("nodes"))
+                .and_then(|n| n.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|n| n.get("name").and_then(|v| v.as_str()))
+                        .map(|s| s.to_string())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
     /// Fetch backlog issues assigned to the current user (API key owner)
     pub async fn fetch_backlog_issues(&self) -> Result<Vec<LinearIssue>, String> {
         let query = r#"
@@ -293,6 +387,22 @@ impl LinearClient {
                     .labels
                     .map(|l| l.nodes.into_iter().map(|n| n.name).collect())
                     .unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    /// Fetch recent backlog issues assigned to user that contain `~gasit` in description
+    pub async fn fetch_gasit_issues(&self) -> Result<Vec<LinearIssue>, String> {
+        // Fetch all backlog issues, then filter for ~gasit client-side
+        // Linear GraphQL doesn't support description text search
+        let all_issues = self.fetch_backlog_issues().await?;
+        Ok(all_issues
+            .into_iter()
+            .filter(|issue| {
+                issue
+                    .description
+                    .as_ref()
+                    .is_some_and(|d| d.contains("~gasit"))
             })
             .collect())
     }
@@ -407,6 +517,43 @@ mod tests {
 
     fn get_test_api_key() -> Option<String> {
         std::env::var("VIBE_KANBAN_LINEAR_API_KEY").ok()
+    }
+
+    #[tokio::test]
+    async fn test_fetch_issue_by_identifier() {
+        let Some(api_key) = get_test_api_key() else {
+            eprintln!("Skipping test: VIBE_KANBAN_LINEAR_API_KEY not set");
+            return;
+        };
+
+        let client = LinearClient::new(api_key);
+
+        // Test with a non-existent issue
+        let result = client.fetch_issue_by_identifier("FAKE-99999").await;
+        assert!(result.is_err(), "Should fail for non-existent issue");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_gasit_issues() {
+        let Some(api_key) = get_test_api_key() else {
+            eprintln!("Skipping test: VIBE_KANBAN_LINEAR_API_KEY not set");
+            return;
+        };
+
+        let client = LinearClient::new(api_key);
+        let result = client.fetch_gasit_issues().await;
+
+        match result {
+            Ok(issues) => {
+                println!("Found {} ~gasit issues", issues.len());
+                for issue in &issues {
+                    println!("  - {} [{}]", issue.title, issue.identifier);
+                }
+            }
+            Err(e) => {
+                panic!("Failed to fetch gasit issues: {}", e);
+            }
+        }
     }
 
     #[tokio::test]

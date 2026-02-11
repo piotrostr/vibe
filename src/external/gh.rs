@@ -245,7 +245,12 @@ pub fn get_all_open_prs() -> Result<HashMap<String, BranchPrInfo>> {
     let repo_info: RepoInfo = serde_json::from_slice(&repo_output.stdout)?;
     let owner = repo_info.owner.login;
     let repo = repo_info.name;
-    tracing::trace!("gh api: repo view done in {:?} - {}/{}", start.elapsed(), owner, repo);
+    tracing::trace!(
+        "gh api: repo view done in {:?} - {}/{}",
+        start.elapsed(),
+        owner,
+        repo
+    );
 
     // Execute batch GraphQL query
     let gql_start = std::time::Instant::now();
@@ -367,11 +372,19 @@ pub fn get_pr_for_branch(branch: &str) -> Result<Option<BranchPrInfo>> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("no pull requests found") || stderr.contains("no open pull requests") {
-            tracing::trace!("gh api: pr view {} - no PR found ({:?})", branch, start.elapsed());
+            tracing::trace!(
+                "gh api: pr view {} - no PR found ({:?})",
+                branch,
+                start.elapsed()
+            );
             return Ok(None);
         }
         if stderr.contains("Could not resolve") {
-            tracing::trace!("gh api: pr view {} - branch not found ({:?})", branch, start.elapsed());
+            tracing::trace!(
+                "gh api: pr view {} - branch not found ({:?})",
+                branch,
+                start.elapsed()
+            );
             return Ok(None);
         }
         anyhow::bail!("gh pr view failed: {}", stderr);
@@ -379,7 +392,13 @@ pub fn get_pr_for_branch(branch: &str) -> Result<Option<BranchPrInfo>> {
 
     let stdout = String::from_utf8(output.stdout)?;
     let pr_info: BranchPrInfo = serde_json::from_str(&stdout)?;
-    tracing::trace!("gh api: pr view {} - found PR #{} state={} ({:?})", branch, pr_info._number, pr_info.state, start.elapsed());
+    tracing::trace!(
+        "gh api: pr view {} - found PR #{} state={} ({:?})",
+        branch,
+        pr_info._number,
+        pr_info.state,
+        start.elapsed()
+    );
     Ok(Some(pr_info))
 }
 

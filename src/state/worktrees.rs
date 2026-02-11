@@ -38,10 +38,6 @@ impl WorktreesState {
         self.branch_prs.insert(branch, pr_info);
     }
 
-    pub fn clear_branch_pr(&mut self, branch: &str) {
-        self.branch_prs.remove(branch);
-    }
-
     /// Mark a branch as having no PR (cache this to avoid repeated lookups)
     pub fn mark_no_pr(&mut self, branch: String) {
         self.no_pr_cache.insert(branch, Instant::now());
@@ -54,17 +50,6 @@ impl WorktreesState {
         } else {
             false
         }
-    }
-
-    /// Get branches that need PR lookup (have worktree, not in PR map, not in no-PR cache)
-    pub fn branches_needing_pr_lookup(&self) -> Vec<String> {
-        self.worktrees
-            .iter()
-            .filter(|wt| {
-                !self.branch_prs.contains_key(&wt.branch) && !self.is_cached_no_pr(&wt.branch)
-            })
-            .map(|wt| wt.branch.clone())
-            .collect()
     }
 
     /// Clear expired entries from the no-PR cache

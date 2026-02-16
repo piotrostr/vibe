@@ -6,7 +6,7 @@ Terminal-based kanban board for managing Claude Code sessions with git worktrees
 
 - **Kanban board** - organize tasks across Backlog, In Progress, In Review, and Done columns
 - **Git worktree integration** - each task gets its own worktree via [worktrunk](https://github.com/piotrostr/worktrunk)
-- **Zellij sessions** - launch and manage Claude Code sessions per task
+- **Zellij sessions** - launch and manage Claude Code (or Codex) sessions per task
 - **Linear sync** - import issues from Linear backlog
 - **PR status tracking** - see PR state, merge conflicts, and CI status inline
 - **Claude activity monitoring** - see when Claude is thinking, idle, or waiting for input
@@ -26,7 +26,7 @@ This will detect your OS, install dependencies, configure Zellij, set up the Cla
 
 ### Prerequisites
 
-- [Claude Code](https://github.com/anthropics/claude-code) - the AI coding assistant this tool orchestrates
+- [Claude Code](https://github.com/anthropics/claude-code) or [Codex](https://github.com/openai/codex) - the AI coding assistant this tool orchestrates
 - [Rust](https://rustup.rs/) - for building vibe and worktrunk
 
 ### Install vibe
@@ -46,7 +46,7 @@ cargo install --path .
 ### Dependencies
 
 - [worktrunk](https://github.com/max-sixty/worktrunk) (`wt`) - git worktree manager
-- [zellij](https://zellij.dev/) - terminal multiplexer for Claude sessions
+- [zellij](https://zellij.dev/) - terminal multiplexer for assistant sessions
 - [neovim](https://neovim.io/) - used as Zellij's scrollback editor
 - [gh](https://cli.github.com/) (optional) - GitHub CLI for PR status
 
@@ -59,6 +59,12 @@ cd your-project
 vibe
 ```
 
+Use Codex instead of Claude Code:
+
+```bash
+vibe --codex
+```
+
 ### Key Bindings
 
 | Key | Action |
@@ -66,7 +72,7 @@ vibe
 | `j/k` | Navigate up/down |
 | `h/l` | Switch columns |
 | `J/K` | Move task between columns |
-| `g` | Launch Claude session for task |
+| `g` | Launch coding session for task |
 | `p` | Launch with plan mode |
 | `Enter` | View task details |
 | `c` | Create new task |

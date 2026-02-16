@@ -14,14 +14,18 @@ mod terminal;
 mod ui;
 
 use app::App;
-use external::LinearClient;
+use external::{AssistantCli, LinearClient};
 use storage::TaskStorage;
 use terminal::Terminal;
 
 #[derive(Parser)]
 #[command(name = "vibe")]
-#[command(about = "Terminal-based kanban board for managing Claude Code sessions")]
+#[command(about = "Terminal-based kanban board for managing Claude Code or Codex sessions")]
 struct Cli {
+    /// Launch task sessions with Codex instead of Claude Code
+    #[arg(long, global = true)]
+    codex: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -90,7 +94,12 @@ async fn main() -> Result<()> {
             init_tracing()?;
 
             let mut terminal = Terminal::new()?;
-            let mut app = App::new()?;
+            let assistant = if cli.codex {
+                AssistantCli::Codex
+            } else {
+                AssistantCli::Claude
+            };
+            let mut app = App::new(assistant)?;
 
             let result = app.run(&mut terminal).await;
 

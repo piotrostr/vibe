@@ -4,6 +4,13 @@ use anyhow::Result;
 use std::path::Path;
 use std::process::Command;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AssistantCli {
+    #[default]
+    Claude,
+    Codex,
+}
+
 /// Open a new tmux pane running zellij with claude
 /// This creates a vertical split in tmux and runs the zellij session there
 pub fn open_tmux_pane_with_zellij_claude(session_name: &str, cwd: &Path) -> Result<()> {
@@ -242,12 +249,77 @@ fn wt_binary() -> String {
     })
 }
 
-/// Launch claude in a zellij session for a worktree
+fn codex_flags(plan_mode: bool) -> &'static str {
+    if plan_mode {
+        "--ask-for-approval on-request --sandbox read-only"
+    } else {
+        "--dangerously-bypass-approvals-and-sandbox"
+    }
+}
+
+fn commands_for_existing_worktree(assistant: AssistantCli, plan_mode: bool) -> (String, String) {
+    match assistant {
+        AssistantCli::Claude => {
+            // For Claude we can safely use --continue for both fresh and resumed sessions.
+            let cmd = if plan_mode {
+                "claude --continue --permission-mode plan".to_string()
+            } else {
+                "claude --continue --dangerously-skip-permissions".to_string()
+            };
+            (cmd.clone(), cmd)
+        }
+        AssistantCli::Codex => {
+            let flags = codex_flags(plan_mode);
+            (
+                format!("codex {flags}"),
+                format!("codex resume --last {flags}"),
+            )
+        }
+    }
+}
+
+fn commands_with_context(
+    assistant: AssistantCli,
+    plan_mode: bool,
+    context_file: &std::path::Path,
+) -> (String, String) {
+    match assistant {
+        AssistantCli::Claude => {
+            if plan_mode {
+                (
+                    format!(
+                        "claude --permission-mode plan \"$(cat {})\"",
+                        context_file.display()
+                    ),
+                    "claude --continue --permission-mode plan".to_string(),
+                )
+            } else {
+                (
+                    format!(
+                        "claude --dangerously-skip-permissions \"$(cat {})\"",
+                        context_file.display()
+                    ),
+                    "claude --continue --dangerously-skip-permissions".to_string(),
+                )
+            }
+        }
+        AssistantCli::Codex => {
+            let flags = codex_flags(plan_mode);
+            (
+                format!("codex {flags} \"$(cat {})\"", context_file.display()),
+                format!("codex resume --last {flags}"),
+            )
+        }
+    }
+}
+
+/// Launch assistant CLI in a zellij session for a worktree
 /// Uses `wt switch -x` to switch/create worktree AND launch zellij in one step
 /// The -x script inherits TTY from wt, which inherits from us (via .status())
 /// project_dir: The project's git repo root directory (wt must run from within repo)
 pub fn launch_zellij_claude_in_worktree(
     branch: &str,
+    assistant: AssistantCli,
     plan_mode: bool,
     project_dir: &std::path::Path,
 ) -> Result<()> {
@@ -262,16 +334,8 @@ pub fn launch_zellij_claude_in_worktree(
         anyhow::bail!("project_dir does not exist: {:?}", project_dir);
     }
 
-    // Both fresh and continue use --continue since this is for existing worktrees
-    // Plan mode: no dangerous permissions (blue mode)
-    // Non-plan mode: dangerous permissions (red mode)
-    let claude_cmd = if plan_mode {
-        "claude --continue --permission-mode plan"
-    } else {
-        "claude --continue --dangerously-skip-permissions"
-    };
-
-    let launcher = create_launcher_script(&session_name, claude_cmd, claude_cmd, plan_mode)?;
+    let (fresh_cmd, continue_cmd) = commands_for_existing_worktree(assistant, plan_mode);
+    let launcher = create_launcher_script(&session_name, &fresh_cmd, &continue_cmd, plan_mode)?;
     let launcher_path = launcher.to_str().unwrap();
 
     // Use .status() to inherit TTY - this is critical for zellij to work!
@@ -300,12 +364,13 @@ pub fn launch_zellij_claude_in_worktree(
     }
 }
 
-/// Launch claude in a zellij session with task context for fresh tasks
+/// Launch assistant CLI in a zellij session with task context for fresh tasks
 /// Creates worktree if needed, passes task context as initial prompt
 /// project_dir: The project's git repo root directory (wt must run from within repo)
 pub fn launch_zellij_claude_in_worktree_with_context(
     branch: &str,
     task_context: &str,
+    assistant: AssistantCli,
     plan_mode: bool,
     project_dir: &std::path::Path,
 ) -> Result<()> {
@@ -329,27 +394,7 @@ pub fn launch_zellij_claude_in_worktree_with_context(
     let context_file = script_dir.join(format!("{}-context.txt", session_name));
     std::fs::write(&context_file, task_context)?;
 
-    // Fresh: pass prompt as positional argument
-    // Continue: use --continue for EXITED sessions
-    // Plan mode: no dangerous permissions (blue mode)
-    // Non-plan mode: dangerous permissions (red mode)
-    let (fresh_cmd, continue_cmd) = if plan_mode {
-        (
-            format!(
-                "claude --permission-mode plan \"$(cat {})\"",
-                context_file.display()
-            ),
-            "claude --continue --permission-mode plan".to_string(),
-        )
-    } else {
-        (
-            format!(
-                "claude --dangerously-skip-permissions \"$(cat {})\"",
-                context_file.display()
-            ),
-            "claude --continue --dangerously-skip-permissions".to_string(),
-        )
-    };
+    let (fresh_cmd, continue_cmd) = commands_with_context(assistant, plan_mode, &context_file);
 
     let launcher = create_launcher_script(&session_name, &fresh_cmd, &continue_cmd, plan_mode)?;
     let launcher_path = launcher.to_str().unwrap();

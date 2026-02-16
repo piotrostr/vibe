@@ -6,10 +6,11 @@ use tokio::sync::mpsc;
 use std::path::PathBuf;
 
 use crate::external::{
-    ActivityWatcher, BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader, LinearClient,
-    LinearIssue, LinearIssueStatus, WorktreeInfo, ZellijSession, count_active_sessions,
-    edit_markdown, get_all_open_prs, get_pr_for_branch, launch_zellij_claude_in_worktree,
-    launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
+    ActivityWatcher, AssistantCli, BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader,
+    LinearClient, LinearIssue, LinearIssueStatus, WorktreeInfo, ZellijSession,
+    count_active_sessions, edit_markdown, get_all_open_prs, get_pr_for_branch,
+    launch_zellij_claude_in_worktree, launch_zellij_claude_in_worktree_with_context,
+    list_sessions_with_status, list_worktrees,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
 use crate::state::{
@@ -32,6 +33,7 @@ type PlanPresenceResult = (String, bool); // (task_id, has_plan)
 pub struct App {
     state: AppState,
     storage: TaskStorage,
+    assistant: AssistantCli,
     events: EventStream,
     last_session_poll: std::time::Instant,
     last_animation_tick: std::time::Instant,
@@ -62,7 +64,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new() -> Result<Self> {
+    pub fn new(assistant: AssistantCli) -> Result<Self> {
         // Create storage from current directory
         let storage = TaskStorage::from_cwd()?;
         let project_name = storage.project_name().to_string();
@@ -198,6 +200,7 @@ impl App {
         Ok(Self {
             state,
             storage,
+            assistant,
             events: EventStream::new(),
             last_session_poll: startup_instant,
             last_animation_tick: std::time::Instant::now(),
@@ -446,11 +449,7 @@ impl App {
 
             let mut pr_map = match get_all_open_prs() {
                 Ok(map) => {
-                    tracing::info!(
-                        "Batch PR fetch: {} PRs in {:?}",
-                        map.len(),
-                        start.elapsed()
-                    );
+                    tracing::info!("Batch PR fetch: {} PRs in {:?}", map.len(), start.elapsed());
                     map
                 }
                 Err(e) => {
@@ -533,7 +532,11 @@ impl App {
                 );
             }
 
-            tracing::info!("Total PR fetch: {} PRs in {:?}", pr_map.len(), start.elapsed());
+            tracing::info!(
+                "Total PR fetch: {} PRs in {:?}",
+                pr_map.len(),
+                start.elapsed()
+            );
             let _ = sender.blocking_send(Ok(pr_map));
         });
     }
@@ -1340,8 +1343,12 @@ impl App {
                 // If in worktrees view, use selected worktree directly
                 if let Some(wt) = self.state.worktrees.selected() {
                     terminal.suspend()?;
-                    let result =
-                        launch_zellij_claude_in_worktree(&wt.branch, plan_mode, &project_dir);
+                    let result = launch_zellij_claude_in_worktree(
+                        &wt.branch,
+                        self.assistant,
+                        plan_mode,
+                        &project_dir,
+                    );
                     terminal.resume()?;
                     if let Err(e) = result {
                         tracing::error!("Failed to launch session: {}", e);
@@ -1388,6 +1395,7 @@ impl App {
         let result = launch_zellij_claude_in_worktree_with_context(
             &branch,
             &task_context,
+            self.assistant,
             plan_mode,
             &project_dir,
         );

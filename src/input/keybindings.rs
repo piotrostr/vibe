@@ -162,6 +162,9 @@ fn kanban_bindings(key: KeyEvent) -> Option<Action> {
         // Linear sync
         (KeyCode::Char('L'), KeyModifiers::SHIFT) => Some(Action::SyncLinear),
 
+        // Archive done tasks
+        (KeyCode::Char('A'), KeyModifiers::SHIFT) => Some(Action::ArchiveDone),
+
         // Refresh
         (KeyCode::Char('r'), KeyModifiers::NONE) => Some(Action::Refresh),
 

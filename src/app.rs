@@ -752,6 +752,9 @@ impl App {
             Action::ShowLogs => {
                 self.handle_show_logs();
             }
+            Action::ArchiveDone => {
+                self.handle_archive_done()?;
+            }
 
             // Command mode actions (vim-like ;f)
             Action::StartCommand => {
@@ -1219,6 +1222,34 @@ impl App {
         // Refresh to get updated data
         self.refresh()?;
 
+        Ok(())
+    }
+
+    fn handle_archive_done(&mut self) -> Result<()> {
+        use crate::state::TaskStatus;
+
+        let done_task_ids: Vec<String> = self
+            .state
+            .tasks
+            .tasks_in_column_with_prs(
+                TaskStatus::Done,
+                &self.state.worktrees.branch_prs,
+                &self.state.worktrees.worktrees,
+                &self.state.linear_issue_statuses,
+            )
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+
+        if done_task_ids.is_empty() {
+            tracing::info!("No done tasks to archive");
+            return Ok(());
+        }
+
+        let count = self.storage.archive_tasks(&done_task_ids)?;
+        tracing::info!("Archived {} done tasks", count);
+
+        self.refresh()?;
         Ok(())
     }
 

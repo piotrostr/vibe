@@ -248,6 +248,7 @@ pub fn render_help_modal(frame: &mut Frame, area: Rect) {
         Line::from("  c                  Create task"),
         Line::from("  e                  Edit task (nvim)"),
         Line::from("  d                  Delete task"),
+        Line::from("  A                  Archive done tasks"),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Worktrees",

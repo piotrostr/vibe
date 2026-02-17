@@ -41,4 +41,5 @@ pub enum Action {
     Refresh,
     SyncLinear,
     ShowLogs,
+    ArchiveDone,
 }

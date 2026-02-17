@@ -342,6 +342,37 @@ impl TaskStorage {
         Ok(())
     }
 
+    /// Archive tasks by moving their files to an archive/ subdirectory.
+    /// Returns the number of tasks archived.
+    pub fn archive_tasks(&self, task_ids: &[String]) -> Result<usize> {
+        if task_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let archive_dir = self.tasks_dir.join("archive");
+        std::fs::create_dir_all(&archive_dir)
+            .with_context(|| format!("Failed to create archive directory: {:?}", archive_dir))?;
+
+        let mut archived = 0;
+        for task_id in task_ids {
+            match self.find_task_file(task_id) {
+                Ok((path, _)) => {
+                    let filename = path.file_name().unwrap();
+                    let dest = archive_dir.join(filename);
+                    std::fs::rename(&path, &dest).with_context(|| {
+                        format!("Failed to archive task file: {:?} -> {:?}", path, dest)
+                    })?;
+                    archived += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("Skipping archive of task {}: {}", task_id, e);
+                }
+            }
+        }
+
+        Ok(archived)
+    }
+
     /// Find task file by ID
     fn find_task_file(&self, task_id: &str) -> Result<(PathBuf, TaskFrontmatter)> {
         let pattern = format!("{}/*.md", self.tasks_dir.display());
@@ -513,5 +544,46 @@ created: 2024-01-15
         assert_eq!(fm.id, "abc123");
         assert_eq!(fm.linear_id, Some("TEAM-456".to_string()));
         assert_eq!(fm.created, "2024-01-15");
+    }
+
+    #[test]
+    fn test_archive_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = TaskStorage::new_with_base(dir.path(), "test-project").unwrap();
+
+        let t1 = storage.create_task("Task One", None).unwrap();
+        let t2 = storage.create_task("Task Two", None).unwrap();
+        let t3 = storage.create_task("Task Three", None).unwrap();
+
+        assert_eq!(storage.list_tasks().unwrap().len(), 3);
+
+        let archived = storage.archive_tasks(&[t1.id.clone(), t3.id.clone()]).unwrap();
+        assert_eq!(archived, 2);
+
+        // Only t2 remains in active tasks
+        let remaining = storage.list_tasks().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, t2.id);
+
+        // Archived files exist in archive directory
+        let archive_dir = storage.tasks_dir().join("archive");
+        assert!(archive_dir.exists());
+        let archived_files: Vec<_> = std::fs::read_dir(&archive_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(archived_files.len(), 2);
+    }
+
+    #[test]
+    fn test_archive_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = TaskStorage::new_with_base(dir.path(), "test-project").unwrap();
+
+        storage.create_task("Task One", None).unwrap();
+
+        let archived = storage.archive_tasks(&[]).unwrap();
+        assert_eq!(archived, 0);
+        assert_eq!(storage.list_tasks().unwrap().len(), 1);
     }
 }

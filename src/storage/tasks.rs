@@ -557,7 +557,9 @@ created: 2024-01-15
 
         assert_eq!(storage.list_tasks().unwrap().len(), 3);
 
-        let archived = storage.archive_tasks(&[t1.id.clone(), t3.id.clone()]).unwrap();
+        let archived = storage
+            .archive_tasks(&[t1.id.clone(), t3.id.clone()])
+            .unwrap();
         assert_eq!(archived, 2);
 
         // Only t2 remains in active tasks

@@ -37,6 +37,8 @@ pub enum Action {
     ExecuteCommand,
     CancelCommand,
 
+    LaunchPrime,
+
     ShowHelp,
     Refresh,
     SyncLinear,

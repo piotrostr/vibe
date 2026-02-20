@@ -425,6 +425,7 @@ pub fn launch_zellij_claude_in_worktree_with_context(
 }
 
 fn prime_prompt(project_name: &str) -> String {
+    let prime_session = super::sanitize_session_name(&format!("{}.prime", project_name));
     format!(
         "This is the prime session for {project}.\n\
          \n\
@@ -439,8 +440,33 @@ fn prime_prompt(project_name: &str) -> String {
          - Any conversation that doesn't belong to a specific task branch\n\
          \n\
          The board (vibe) and Linear track the tasks. Implementation happens in \
-         separate worktree sessions. This is the war room.",
+         separate worktree sessions. This is the war room.\n\
+         \n\
+         You are session: {session}\n\
+         Workers report to you via zellij write-chars with prefixes: [DONE], [BLOCKED], [PROGRESS].\n\
+         You can check on workers with dump-screen and send them input with write-chars.\n\
+         Use /prime for the full reference on inter-session communication.",
         project = project_name,
+        session = prime_session,
+    )
+}
+
+/// Rapporting instructions appended to worker task context.
+/// Tells the worker how to report back to the prime session.
+pub fn rapporting_instructions(project_name: &str) -> String {
+    let prime_session = super::sanitize_session_name(&format!("{}.prime", project_name));
+    format!(
+        "\n---\n\
+         Prime coordination: when you complete this task, hit a blocker, or make significant progress, \
+         report to the prime session:\n\
+         \n\
+         Done:     zellij -s {prime} action write-chars '[DONE] <1-line summary>' && \
+         zellij -s {prime} action write 13\n\
+         Blocked:  zellij -s {prime} action write-chars '[BLOCKED] <what you need>' && \
+         zellij -s {prime} action write 13\n\
+         Progress: zellij -s {prime} action write-chars '[PROGRESS] <milestone>' && \
+         zellij -s {prime} action write 13",
+        prime = prime_session,
     )
 }
 

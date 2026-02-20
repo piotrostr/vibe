@@ -80,6 +80,9 @@ pub struct AppState {
 
     /// True when PR info is being fetched in the background
     pub pr_loading: bool,
+
+    /// Whether the prime session is currently active (detected from zellij sessions)
+    pub prime_session_active: bool,
 }
 
 impl AppState {
@@ -124,6 +127,8 @@ impl AppState {
             claude_process_count: 0,
 
             pr_loading: false,
+
+            prime_session_active: false,
         }
     }
 

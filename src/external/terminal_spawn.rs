@@ -424,6 +424,85 @@ pub fn launch_zellij_claude_in_worktree_with_context(
     }
 }
 
+fn prime_prompt(project_name: &str) -> String {
+    format!(
+        "This is the prime session for {project}.\n\
+         \n\
+         You're the coordinator here - not implementing, but steering the work. \
+         Your ~/.claude/CLAUDE.md is loaded with everything you need to know.\n\
+         \n\
+         This session is for:\n\
+         - Reviewing what's in flight, what's blocked, what's next\n\
+         - Planning new work items and breaking down features\n\
+         - Architecture, trade-offs, priorities\n\
+         - PR reviews and feedback\n\
+         - Any conversation that doesn't belong to a specific task branch\n\
+         \n\
+         The board (vibe) and Linear track the tasks. Implementation happens in \
+         separate worktree sessions. This is the war room.",
+        project = project_name,
+    )
+}
+
+/// Launch a prime session - the project-level coordination session.
+/// Runs on the project root (no worktree), using zellij directly.
+pub fn launch_prime_session(
+    project_name: &str,
+    assistant: AssistantCli,
+    project_dir: &std::path::Path,
+) -> Result<()> {
+    let session_name = super::sanitize_session_name(&format!("{}.prime", project_name));
+
+    if !project_dir.exists() {
+        anyhow::bail!("project_dir does not exist: {:?}", project_dir);
+    }
+
+    // Write prime prompt to context file
+    let script_dir = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("vibe-scripts");
+    std::fs::create_dir_all(&script_dir)?;
+
+    let context_file = script_dir.join(format!("{}-context.txt", session_name));
+    std::fs::write(&context_file, prime_prompt(project_name))?;
+
+    let (fresh_cmd, continue_cmd) = match assistant {
+        AssistantCli::Claude => (
+            format!(
+                "claude --dangerously-skip-permissions \"$(cat {})\"",
+                context_file.display()
+            ),
+            "claude --continue --dangerously-skip-permissions".to_string(),
+        ),
+        AssistantCli::Codex => {
+            let flags = codex_flags(false);
+            (
+                format!("codex {flags} \"$(cat {})\"", context_file.display()),
+                format!("codex resume --last {flags}"),
+            )
+        }
+    };
+
+    let launcher = create_launcher_script(&session_name, &fresh_cmd, &continue_cmd, false)?;
+    let launcher_path = launcher.to_str().unwrap();
+
+    // Run launcher directly in project root (no wt needed)
+    let status = Command::new(launcher_path)
+        .current_dir(project_dir)
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("prime session launcher failed");
+    }
+
+    Ok(())
+}
+
+/// Get the prime session name for a project
+pub fn prime_session_name(project_name: &str) -> String {
+    super::sanitize_session_name(&format!("{}.prime", project_name))
+}
+
 /// Attach to existing zellij session in current terminal (blocks)
 /// Handles dead sessions by force-resurrecting them
 pub fn attach_zellij_foreground(session_name: &str) -> Result<()> {

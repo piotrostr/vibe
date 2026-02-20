@@ -100,11 +100,24 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
                 &project_info,
                 Style::default().fg(Color::Yellow),
             ));
-        } else if i == 2
-            && let Some((ref linear_text, linear_color)) = linear_info
-        {
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(linear_text, Style::default().fg(linear_color)));
+        } else if i == 2 {
+            if let Some((ref linear_text, linear_color)) = linear_info {
+                spans.push(Span::raw("  "));
+                spans.push(Span::styled(linear_text, Style::default().fg(linear_color)));
+            }
+            // Prime session indicator
+            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+            if state.prime_session_active {
+                spans.push(Span::styled(
+                    "Prime: active",
+                    Style::default().fg(Color::Green),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    "Prime: P to launch",
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
         }
 
         lines.push(Line::from(spans));
@@ -263,6 +276,7 @@ pub fn render_help_modal(frame: &mut Frame, area: Rect) {
         )]),
         Line::from("  g                  Gas it (launch Claude)"),
         Line::from("  p                  Plan it (launch in plan mode)"),
+        Line::from("  P                  Prime session (war room)"),
         Line::from("  v                  View PR"),
         Line::from("  S                  Show sessions"),
         Line::from("  a / Enter          Attach to session"),

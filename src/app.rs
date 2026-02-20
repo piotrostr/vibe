@@ -9,8 +9,9 @@ use crate::external::{
     ActivityWatcher, AssistantCli, BranchPrInfo, ClaudeActivityTracker, ClaudePlanReader,
     LinearClient, LinearIssue, LinearIssueStatus, WorktreeInfo, ZellijSession,
     count_active_sessions, edit_markdown, get_all_open_prs, get_pr_for_branch,
-    launch_zellij_claude_in_worktree, launch_zellij_claude_in_worktree_with_context,
-    list_sessions_with_status, list_worktrees,
+    launch_prime_session, launch_zellij_claude_in_worktree,
+    launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
+    prime_session_name,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
 use crate::state::{
@@ -308,9 +309,16 @@ impl App {
                 }
             }
         }
-        // Update activity state immediately after sessions refresh
+        // Update activity state and prime session status after sessions refresh
         if sessions_updated {
             self.poll_claude_activity();
+            let prime_name = prime_session_name(self.storage.project_name());
+            self.state.prime_session_active = self
+                .state
+                .sessions
+                .sessions
+                .iter()
+                .any(|s| s.name == prime_name);
         }
 
         // Non-blocking check for batch PR info results
@@ -699,6 +707,9 @@ impl App {
             }
             Action::LaunchSessionPlan => {
                 self.handle_launch_session(terminal, true)?;
+            }
+            Action::LaunchPrime => {
+                self.handle_launch_prime(terminal)?;
             }
             Action::ViewPR => {
                 self.handle_view_pr()?;
@@ -1447,6 +1458,31 @@ impl App {
         // Always refetch after returning from a session - PR state may have changed
         self.refetch_on_kanban_mount();
 
+        Ok(())
+    }
+
+    fn handle_launch_prime(&mut self, terminal: &mut Terminal) -> Result<()> {
+        let project_dir = match self.get_project_dir() {
+            Some(dir) if dir.exists() => dir,
+            _ => {
+                tracing::error!("Failed to get project directory for prime session");
+                return Ok(());
+            }
+        };
+
+        let project_name = self.storage.project_name().to_string();
+
+        terminal.suspend()?;
+
+        let result = launch_prime_session(&project_name, self.assistant, &project_dir);
+
+        terminal.resume()?;
+
+        if let Err(e) = result {
+            tracing::error!("Failed to launch prime session: {}", e);
+        }
+
+        self.refetch_on_kanban_mount();
         Ok(())
     }
 

@@ -15,6 +15,29 @@ fn project_name() -> Option<String> {
     Some(basename.trim_end_matches(".git").to_string())
 }
 
+/// Match sanitize_session_name from src/external/zellij.rs:
+/// non-alphanumeric chars (except - and _) become -, truncate to 36 chars.
+fn sanitize_session_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+
+    if sanitized.len() > 36 {
+        sanitized[..36].trim_end_matches('-').to_string()
+    } else {
+        sanitized
+    }
+}
+
 fn list_zellij_sessions() -> Vec<String> {
     let Ok(output) = Command::new("zellij").args(["list-sessions", "-s"]).output() else {
         return Vec::new();
@@ -30,10 +53,10 @@ fn list_zellij_sessions() -> Vec<String> {
 }
 
 fn resolve_target(target: &str) -> Result<String, String> {
-    // "prime" -> {project}.prime
+    // "prime" -> sanitize("{project}.prime") -> e.g. "vibe-prime"
     if target == "prime" {
         let project = project_name().ok_or("could not determine project name from git remote")?;
-        return Ok(format!("{}.prime", project));
+        return Ok(sanitize_session_name(&format!("{}.prime", project)));
     }
 
     // ticket ID pattern (letters-digits, e.g. AMB-921, VIB-19)
@@ -70,6 +93,20 @@ fn resolve_target(target: &str) -> Result<String, String> {
     Ok(target.to_string())
 }
 
+fn send_interrupt(session: &str) -> Result<(), String> {
+    // write 3 = Ctrl+C
+    let status = Command::new("zellij")
+        .args(["-s", session, "action", "write", "3"])
+        .status()
+        .map_err(|e| format!("failed to run zellij: {}", e))?;
+    if !status.success() {
+        return Err(format!("zellij write (ctrl-c) failed for session '{}'", session));
+    }
+    // small delay so the target processes the interrupt before we type
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    Ok(())
+}
+
 fn send_message(session: &str, message: &str) -> Result<(), String> {
     let status = Command::new("zellij")
         .args(["-s", session, "action", "write-chars", message])
@@ -93,14 +130,26 @@ fn send_message(session: &str, message: &str) -> Result<(), String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("usage: cousin-mail <target> <message...>");
+
+    let mut urgent = false;
+    let mut positional: Vec<&str> = Vec::new();
+    for arg in &args[1..] {
+        if arg == "--urgent" || arg == "-u" {
+            urgent = true;
+        } else {
+            positional.push(arg);
+        }
+    }
+
+    if positional.len() < 2 {
+        eprintln!("usage: cousin-mail [--urgent] <target> <message...>");
         eprintln!("  target: prime | TICKET-ID | session-name");
+        eprintln!("  --urgent: send Ctrl+C before message to interrupt target");
         return ExitCode::FAILURE;
     }
 
-    let target = &args[1];
-    let message = args[2..].join(" ");
+    let target = positional[0];
+    let message = positional[1..].join(" ");
 
     let session = match resolve_target(target) {
         Ok(s) => s,
@@ -109,6 +158,13 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    if urgent
+        && let Err(e) = send_interrupt(&session)
+    {
+        eprintln!("error: {}", e);
+        return ExitCode::FAILURE;
+    }
 
     if let Err(e) = send_message(&session, &message) {
         eprintln!("error: {}", e);
@@ -125,10 +181,10 @@ mod tests {
 
     #[test]
     fn test_resolve_prime() {
-        // depends on being in a git repo, which we are during cargo test
         let result = resolve_target("prime");
         assert!(result.is_ok());
-        assert!(result.unwrap().ends_with(".prime"));
+        // vibe.prime -> sanitized to vibe-prime
+        assert_eq!(result.unwrap(), "vibe-prime");
     }
 
     #[test]
@@ -139,7 +195,6 @@ mod tests {
 
     #[test]
     fn test_resolve_ticket_no_match() {
-        // no zellij session will match a random ticket
         let result = resolve_target("ZZZ-999");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no zellij session"));
@@ -150,5 +205,52 @@ mod tests {
         let name = project_name();
         assert!(name.is_some());
         assert_eq!(name.unwrap(), "vibe");
+    }
+
+    #[test]
+    fn test_sanitize_session_name() {
+        assert_eq!(sanitize_session_name("vibe.prime"), "vibe-prime");
+        assert_eq!(sanitize_session_name("my/branch"), "my-branch");
+        assert_eq!(sanitize_session_name("simple"), "simple");
+    }
+
+    #[test]
+    fn test_sanitize_truncation() {
+        let long = "a".repeat(50);
+        let result = sanitize_session_name(&long);
+        assert!(result.len() <= 36);
+    }
+
+    #[test]
+    fn test_arg_parsing_urgent_flag() {
+        // simulate: cousin-mail --urgent prime hello
+        let args = vec!["cousin-mail", "--urgent", "prime", "hello"];
+        let mut urgent = false;
+        let mut positional: Vec<&str> = Vec::new();
+        for arg in &args[1..] {
+            if *arg == "--urgent" || *arg == "-u" {
+                urgent = true;
+            } else {
+                positional.push(arg);
+            }
+        }
+        assert!(urgent);
+        assert_eq!(positional, vec!["prime", "hello"]);
+    }
+
+    #[test]
+    fn test_arg_parsing_no_flag() {
+        let args = vec!["cousin-mail", "prime", "hello", "world"];
+        let mut urgent = false;
+        let mut positional: Vec<&str> = Vec::new();
+        for arg in &args[1..] {
+            if *arg == "--urgent" || *arg == "-u" {
+                urgent = true;
+            } else {
+                positional.push(arg);
+            }
+        }
+        assert!(!urgent);
+        assert_eq!(positional, vec!["prime", "hello", "world"]);
     }
 }

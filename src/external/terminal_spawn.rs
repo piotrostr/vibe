@@ -480,7 +480,8 @@ pub fn rapporting_instructions(project_name: &str) -> String {
 }
 
 /// Launch a prime session - the project-level coordination session.
-/// Runs on the project root (no worktree), using zellij directly.
+/// Uses headless PTY so the session always accepts write-chars (even when detached),
+/// then attaches interactively.
 pub fn launch_prime_session(
     project_name: &str,
     assistant: AssistantCli,
@@ -492,43 +493,71 @@ pub fn launch_prime_session(
         anyhow::bail!("project_dir does not exist: {:?}", project_dir);
     }
 
-    // Write prime prompt to context file
-    let script_dir = dirs::cache_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join("vibe-scripts");
-    std::fs::create_dir_all(&script_dir)?;
+    // Check session state: alive, exited, or doesn't exist
+    let session_output = Command::new("zellij")
+        .args(["list-sessions"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
 
-    let context_file = script_dir.join(format!("{}-context.txt", session_name));
-    std::fs::write(&context_file, prime_prompt(project_name))?;
+    let session_line = session_output
+        .lines()
+        .find(|l| l.contains(&session_name));
+    let session_alive = session_line.is_some_and(|l| !l.contains("EXITED"));
+    let session_exited = session_line.is_some_and(|l| l.contains("EXITED"));
 
-    let (fresh_cmd, continue_cmd) = match assistant {
-        AssistantCli::Claude => (
-            format!(
-                "claude --dangerously-skip-permissions \"$(cat {})\"",
-                context_file.display()
-            ),
-            "claude --continue --dangerously-skip-permissions".to_string(),
-        ),
-        AssistantCli::Codex => {
-            let flags = codex_flags(false);
-            (
-                format!("codex {flags} \"$(cat {})\"", context_file.display()),
-                format!("codex resume --last {flags}"),
-            )
+    if !session_alive {
+        if session_exited {
+            // Clean up the dead session so we can recreate it
+            let _ = Command::new("zellij")
+                .args(["delete-session", &session_name])
+                .status();
         }
-    };
 
-    let launcher = create_launcher_script(&session_name, &fresh_cmd, &continue_cmd, false)?;
-    let launcher_path = launcher.to_str().unwrap();
+        let script_dir = dirs::cache_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join("vibe-scripts");
+        std::fs::create_dir_all(&script_dir)?;
 
-    // Run launcher directly in project root (no wt needed)
-    let status = Command::new(launcher_path)
-        .current_dir(project_dir)
-        .status()?;
+        let context_file = script_dir.join(format!("{}-context.txt", session_name));
+        std::fs::write(&context_file, prime_prompt(project_name))?;
 
-    if !status.success() {
-        anyhow::bail!("prime session launcher failed");
+        let (fresh_cmd, continue_cmd) = match assistant {
+            AssistantCli::Claude => (
+                format!(
+                    "claude --dangerously-skip-permissions \"$(cat {})\"",
+                    context_file.display()
+                ),
+                "claude --continue --dangerously-skip-permissions".to_string(),
+            ),
+            AssistantCli::Codex => {
+                let flags = codex_flags(false);
+                (
+                    format!("codex {flags} \"$(cat {})\"", context_file.display()),
+                    format!("codex resume --last {flags}"),
+                )
+            }
+        };
+
+        let _launcher =
+            create_launcher_script(&session_name, &fresh_cmd, &continue_cmd, false)?;
+
+        // Use continue script if resuming a dead session, fresh if brand new
+        let shell_script = if session_exited {
+            script_dir.join(format!("{}-continue.sh", session_name))
+        } else {
+            script_dir.join(format!("{}-fresh.sh", session_name))
+        };
+
+        spawn_headless_via_launchd(
+            &session_name,
+            shell_script.to_str().unwrap(),
+            project_dir.to_str().unwrap(),
+        )?;
     }
+
+    // Attach interactively (user sees the session in their terminal)
+    attach_zellij_foreground(&session_name)?;
 
     Ok(())
 }
@@ -544,6 +573,78 @@ fn headless_zellij_bin() -> String {
         .filter(|p| p.exists())
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|| "headless-zellij".to_string())
+}
+
+/// Spawn a headless zellij session via launchd so the PTY-holding process
+/// lives outside any sandbox/process-group. This is the only reliable way
+/// to keep write-chars working when the spawning process (e.g. Claude Code)
+/// tears down its process tree.
+fn spawn_headless_via_launchd(
+    session_name: &str,
+    shell_script: &str,
+    working_dir: &str,
+) -> Result<()> {
+    let label = format!("com.vibe.headless.{}", session_name);
+    let headless = headless_zellij_bin();
+
+    let plist_dir = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("vibe-launchd");
+    std::fs::create_dir_all(&plist_dir)?;
+    let plist_path = plist_dir.join(format!("{}.plist", label));
+
+    // Collect current PATH and HOME for the plist
+    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>python3</string>
+        <string>{headless}</string>
+        <string>--no-fork</string>
+        <string>{session_name}</string>
+        <string>{shell_script}</string>
+        <string>{working_dir}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>{path}</string>
+        <key>HOME</key>
+        <string>{home}</string>
+    </dict>
+</dict>
+</plist>"#,
+    );
+
+    std::fs::write(&plist_path, plist)?;
+
+    // Unload first in case a stale job exists
+    let _ = Command::new("launchctl")
+        .args(["unload", plist_path.to_str().unwrap()])
+        .output();
+
+    let status = Command::new("launchctl")
+        .args(["load", plist_path.to_str().unwrap()])
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("launchctl load failed for: {}", session_name);
+    }
+
+    // Wait for zellij to register
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    Ok(())
 }
 
 /// Launch a Claude session headlessly in a worktree (no TTY required).
@@ -617,26 +718,11 @@ pub fn launch_headless_in_worktree(
     // Fresh script is what headless-zellij uses as SHELL
     let fresh_script = script_dir.join(format!("{}-fresh.sh", session_name));
 
-    // Spawn headless zellij with working directory
-    // Strip env vars that prevent nested zellij/claude sessions
-    let headless = headless_zellij_bin();
-    let status = Command::new("env")
-        .args([
-            "-u", "ZELLIJ",
-            "-u", "ZELLIJ_SESSION_NAME",
-            "-u", "CLAUDECODE",
-            "-u", "CLAUDE_CODE_ENTRYPOINT",
-        ])
-        .arg("python3")
-        .arg(&headless)
-        .arg(&session_name)
-        .arg(fresh_script.to_str().unwrap())
-        .arg(worktree_dir.to_str().unwrap())
-        .status()?;
-
-    if !status.success() {
-        anyhow::bail!("headless-zellij failed for session: {}", session_name);
-    }
+    spawn_headless_via_launchd(
+        &session_name,
+        fresh_script.to_str().unwrap(),
+        worktree_dir.to_str().unwrap(),
+    )?;
 
     Ok(())
 }

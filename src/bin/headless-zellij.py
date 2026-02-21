@@ -13,16 +13,19 @@ import subprocess
 import sys
 import signal
 
-if len(sys.argv) < 3:
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+flags = [a for a in sys.argv[1:] if a.startswith("--")]
+
+if len(args) < 2:
     print(
-        f"Usage: {sys.argv[0]} <session-name> <shell-script> [working-dir]",
+        f"Usage: {sys.argv[0]} [--no-fork] <session-name> <shell-script> [working-dir]",
         file=sys.stderr,
     )
     sys.exit(1)
 
-session_name = sys.argv[1]
-shell_script = sys.argv[2]
-cwd = sys.argv[3] if len(sys.argv) > 3 else None
+session_name = args[0]
+shell_script = args[1]
+cwd = args[2] if len(args) > 2 else None
 
 master, slave = pty.openpty()
 
@@ -46,22 +49,44 @@ proc = subprocess.Popen(
 
 os.close(slave)
 
-# Detach: fork so parent can return, child keeps PTY master alive
-pid = os.fork()
-if pid > 0:
-    # Parent: close master and exit cleanly
+no_fork = "--no-fork" in flags
+
+if no_fork:
+    # Stay in foreground - caller is responsible for backgrounding (e.g. Rust .spawn())
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+    proc.wait()
     os.close(master)
-    sys.exit(0)
+else:
+    # Double-fork to become a true daemon reparented to PID 1 (launchd).
+    # Single fork isn't enough - Claude Code's sandbox reaps the whole
+    # process group. Double fork + setsid escapes it.
+    pid = os.fork()
+    if pid > 0:
+        os.close(master)
+        sys.exit(0)
 
-# Child: keep master open, wait for zellij to finish
-signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    # First child: become session leader, detach from parent's process group
+    os.setsid()
 
-# Redirect own stdio to /dev/null so we're fully detached
-devnull = os.open(os.devnull, os.O_RDWR)
-os.dup2(devnull, 0)
-os.dup2(devnull, 1)
-os.dup2(devnull, 2)
-os.close(devnull)
+    # Second fork: the grandchild is the actual daemon.
+    # It can't be a session leader, so it can never acquire a controlling terminal.
+    pid2 = os.fork()
+    if pid2 > 0:
+        os._exit(0)
 
-proc.wait()
-os.close(master)
+    # Grandchild: true daemon, reparented to launchd
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+    devnull = os.open(os.devnull, os.O_RDWR)
+    os.dup2(devnull, 0)
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+
+    proc.wait()
+    os.close(master)

@@ -454,23 +454,11 @@ fn prime_prompt(project_name: &str) -> String {
 /// Rapporting instructions appended to worker task context.
 /// Tells the worker how to report back to the prime session.
 pub fn rapporting_instructions(_project_name: &str) -> String {
-    format!(
-        "\n---\n\
-         You have a CLI called `cousin` for talking to other Claude sessions.\n\
-         \n\
-         Report to prime:\n\
-         cousin prime \"[DONE] one-line summary, PR #N\"\n\
-         cousin prime \"[BLOCKED] what you need\"\n\
-         cousin prime \"[PROGRESS] milestone\"\n\
-         \n\
-         When prime messages you, always reply: cousin prime \"your response\"\n\
-         See who's around: cousin list\n\
-         \n\
-         You own ONE ticket on ONE branch. When done, report [DONE] and stop.\n\
-         New work gets its own worktree - prime handles that.\n\
-         \n\
-         For the full protocol, run: cat ~/.claude/skills/vibe/SKILL.md",
-    )
+    "\n---\n\
+     Talk to prime and other cousins with the `cousin` CLI:\n\
+     cousin prime \"[DONE] summary\"  |  cousin prime \"[BLOCKED] issue\"  |  cousin list\n\
+     One ticket, one branch. Report [DONE] and stop. Full protocol: cat ~/.claude/skills/vibe/SKILL.md"
+        .to_string()
 }
 
 /// Launch a prime session - the project-level coordination session.

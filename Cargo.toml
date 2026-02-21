@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "vibe-migrate"
 path = "src/bin/migrate.rs"
 
+[[bin]]
+name = "cousin-mail"
+path = "src/bin/cousin_mail.rs"
+
 [lints.clippy]
 uninlined-format-args = "allow"
 

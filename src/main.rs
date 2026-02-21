@@ -52,6 +52,11 @@ enum Command {
         /// Path to markdown file (filename becomes title, contents become description)
         file: PathBuf,
     },
+    /// Tear down finished sessions (launchd + zellij + worktree)
+    Cleanup {
+        /// Specific session or ticket ID to clean up (e.g. VIB-21). Omit for all dead sessions.
+        target: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -134,6 +139,10 @@ async fn main() -> Result<()> {
             println!("Created: {}", task.title);
             Ok(())
         }
+        Some(Command::Cleanup { target }) => {
+            cmd_cleanup(target.as_deref())?;
+            Ok(())
+        }
         None => {
             init_tracing()?;
 
@@ -152,6 +161,88 @@ async fn main() -> Result<()> {
             result
         }
     }
+}
+
+fn cmd_cleanup(target: Option<&str>) -> Result<()> {
+    use std::process::Command as Cmd;
+
+    let launchd_dir = dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("vibe-launchd");
+
+    // Resolve which sessions to clean up
+    let sessions: Vec<String> = if let Some(target) = target {
+        // Specific target: resolve like cousin does (ticket ID or raw name)
+        let output = Cmd::new("zellij")
+            .args(["list-sessions", "-s"])
+            .output()?;
+        let all: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        let upper = target.to_uppercase();
+        let matches: Vec<String> = all
+            .into_iter()
+            .filter(|s| s.to_uppercase().contains(&upper))
+            .collect();
+        if matches.is_empty() {
+            println!("no session matching '{}'", target);
+            return Ok(());
+        }
+        matches
+    } else {
+        // No target: clean up all EXITED sessions for this project
+        let output = Cmd::new("zellij")
+            .args(["list-sessions"])
+            .output()?;
+        let raw = String::from_utf8_lossy(&output.stdout).to_string();
+        // Strip ANSI
+        let stripped: String = {
+            let mut result = String::new();
+            let mut chars = raw.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\x1b' {
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if next.is_ascii_alphabetic() { break; }
+                    }
+                } else {
+                    result.push(c);
+                }
+            }
+            result
+        };
+        stripped
+            .lines()
+            .filter(|l| l.contains("EXITED"))
+            .filter_map(|l| l.split_whitespace().next())
+            .map(|s| s.to_string())
+            .collect()
+    };
+
+    if sessions.is_empty() {
+        println!("nothing to clean up");
+        return Ok(());
+    }
+
+    for session in &sessions {
+        // 1. Unload launchd plist
+        let plist = launchd_dir.join(format!("com.vibe.headless.{}.plist", session));
+        if plist.exists() {
+            let _ = Cmd::new("launchctl").args(["unload", plist.to_str().unwrap()]).output();
+            let _ = std::fs::remove_file(&plist);
+            println!("  unloaded launchd: {}", session);
+        }
+
+        // 2. Kill + delete zellij session
+        let _ = Cmd::new("zellij").args(["kill-session", session]).output();
+        let _ = Cmd::new("zellij").args(["delete-session", session]).output();
+        println!("  removed session: {}", session);
+    }
+
+    println!("cleaned {} session(s)", sessions.len());
+    Ok(())
 }
 
 fn init_tracing() -> Result<()> {

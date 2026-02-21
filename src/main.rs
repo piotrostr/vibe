@@ -105,6 +105,8 @@ async fn main() -> Result<()> {
                 {
                     context.push_str(&format!("\n\nDescription:\n{}", desc));
                 }
+                context.push_str(&format!("\n\nBranch: {}", branch));
+                context.push_str("\n\nRun `just setup` if available to initialize the worktree environment.");
                 context.push_str(&rapporting_instructions(&project_name));
 
                 let assistant = if cli.codex {

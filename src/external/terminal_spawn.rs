@@ -584,29 +584,45 @@ pub fn launch_headless_in_worktree(
         }
     }
 
-    // Resolve worktree path
+    // Resolve worktree path via `wt list --format=json`
     let worktree_output = Command::new(&wt)
         .current_dir(project_dir)
-        .args(["list", "--porcelain"])
+        .args(["list", "--format=json"])
         .output()?;
-    let worktree_list = String::from_utf8_lossy(&worktree_output.stdout);
-    let worktree_dir = worktree_list
-        .lines()
-        .find(|l| l.contains(branch))
-        .and_then(|l| l.split_whitespace().next())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| project_dir.to_path_buf());
+    let worktree_dir = if worktree_output.status.success() {
+        serde_json::from_slice::<Vec<serde_json::Value>>(&worktree_output.stdout)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|e| e.get("branch").and_then(|b| b.as_str()) == Some(branch))
+                    .and_then(|e| e.get("path"))
+                    .and_then(|p| p.as_str())
+                    .map(std::path::PathBuf::from)
+            })
+            .unwrap_or_else(|| project_dir.to_path_buf())
+    } else {
+        project_dir.to_path_buf()
+    };
 
     // Fresh script is what headless-zellij uses as SHELL
     let fresh_script = script_dir.join(format!("{}-fresh.sh", session_name));
 
-    // Spawn headless zellij
+    // Spawn headless zellij with working directory
+    // Strip env vars that prevent nested zellij/claude sessions
     let headless = headless_zellij_bin();
-    let status = Command::new("python3")
+    let status = Command::new("env")
+        .args([
+            "-u", "ZELLIJ",
+            "-u", "ZELLIJ_SESSION_NAME",
+            "-u", "CLAUDECODE",
+            "-u", "CLAUDE_CODE_ENTRYPOINT",
+        ])
+        .arg("python3")
         .arg(&headless)
         .arg(&session_name)
         .arg(fresh_script.to_str().unwrap())
-        .current_dir(&worktree_dir)
+        .arg(worktree_dir.to_str().unwrap())
         .status()?;
 
     if !status.success() {

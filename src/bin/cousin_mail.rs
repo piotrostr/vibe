@@ -197,8 +197,17 @@ fn send_interrupt(session: &str) -> Result<(), String> {
 }
 
 fn send_message(session: &str, message: &str) -> Result<(), String> {
+    // Collapse newlines to spaces - multiline write-chars inserts literal newlines
+    // which submits partial lines before our Enter key fires
+    let flat: String = message
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
     let status = Command::new("zellij")
-        .args(["-s", session, "action", "write-chars", message])
+        .args(["-s", session, "action", "write-chars", &flat])
         .status()
         .map_err(|e| format!("failed to run zellij: {}", e))?;
     if !status.success() {
@@ -230,7 +239,7 @@ fn main() -> ExitCode {
         }
     }
 
-    if positional.first().map(|s| *s) == Some("list") {
+    if positional.first().copied() == Some("list") {
         return cmd_list();
     }
 
@@ -318,7 +327,7 @@ mod tests {
     #[test]
     fn test_arg_parsing_urgent_flag() {
         // simulate: cousin --urgent prime hello
-        let args = vec!["cousin", "--urgent", "prime", "hello"];
+        let args = ["cousin", "--urgent", "prime", "hello"];
         let mut urgent = false;
         let mut positional: Vec<&str> = Vec::new();
         for arg in &args[1..] {
@@ -334,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_arg_parsing_no_flag() {
-        let args = vec!["cousin", "prime", "hello", "world"];
+        let args = ["cousin", "prime", "hello", "world"];
         let mut urgent = false;
         let mut positional: Vec<&str> = Vec::new();
         for arg in &args[1..] {

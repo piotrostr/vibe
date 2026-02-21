@@ -425,6 +425,7 @@ pub fn launch_zellij_claude_in_worktree_with_context(
 }
 
 fn prime_prompt(project_name: &str) -> String {
+    let prime_session = super::sanitize_session_name(&format!("{}.prime", project_name));
     format!(
         "This is the prime session for {project}.\n\
          \n\
@@ -439,8 +440,33 @@ fn prime_prompt(project_name: &str) -> String {
          - Any conversation that doesn't belong to a specific task branch\n\
          \n\
          The board (vibe) and Linear track the tasks. Implementation happens in \
-         separate worktree sessions. This is the war room.",
+         separate worktree sessions. This is the war room.\n\
+         \n\
+         You are session: {session}\n\
+         Workers report to you via zellij write-chars with prefixes: [DONE], [BLOCKED], [PROGRESS].\n\
+         You can check on workers with dump-screen and send them input with write-chars.\n\
+         Use /prime for the full reference on inter-session communication.",
         project = project_name,
+        session = prime_session,
+    )
+}
+
+/// Rapporting instructions appended to worker task context.
+/// Tells the worker how to report back to the prime session.
+pub fn rapporting_instructions(project_name: &str) -> String {
+    let prime_session = super::sanitize_session_name(&format!("{}.prime", project_name));
+    format!(
+        "\n---\n\
+         Prime coordination: when you complete this task, hit a blocker, or make significant progress, \
+         report to the prime session:\n\
+         \n\
+         Done:     zellij -s {prime} action write-chars '[DONE] <1-line summary>' && \
+         zellij -s {prime} action write 13\n\
+         Blocked:  zellij -s {prime} action write-chars '[BLOCKED] <what you need>' && \
+         zellij -s {prime} action write 13\n\
+         Progress: zellij -s {prime} action write-chars '[PROGRESS] <milestone>' && \
+         zellij -s {prime} action write 13",
+        prime = prime_session,
     )
 }
 
@@ -501,6 +527,109 @@ pub fn launch_prime_session(
 /// Get the prime session name for a project
 pub fn prime_session_name(project_name: &str) -> String {
     super::sanitize_session_name(&format!("{}.prime", project_name))
+}
+
+fn headless_zellij_bin() -> String {
+    dirs::home_dir()
+        .map(|h| h.join(".vibe/bin/headless-zellij"))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "headless-zellij".to_string())
+}
+
+/// Launch a Claude session headlessly in a worktree (no TTY required).
+/// Creates the worktree via `wt`, then spawns zellij in the background with a pseudo-TTY.
+pub fn launch_headless_in_worktree(
+    branch: &str,
+    task_context: &str,
+    assistant: AssistantCli,
+    project_dir: &std::path::Path,
+) -> Result<()> {
+    let session_name = super::session_name_for_branch(branch);
+    let wt = wt_binary();
+
+    if !std::path::Path::new(&wt).exists() {
+        anyhow::bail!("wt binary not found at: {}", wt);
+    }
+    if !project_dir.exists() {
+        anyhow::bail!("project_dir does not exist: {:?}", project_dir);
+    }
+
+    // Write task context to file
+    let script_dir = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("vibe-scripts");
+    std::fs::create_dir_all(&script_dir)?;
+
+    let context_file = script_dir.join(format!("{}-context.txt", session_name));
+    std::fs::write(&context_file, task_context)?;
+
+    let (fresh_cmd, continue_cmd) = commands_with_context(assistant, false, &context_file);
+    let _launcher = create_launcher_script(&session_name, &fresh_cmd, &continue_cmd, false)?;
+
+    // Create worktree (wt switch without -x, just ensure worktree exists)
+    let status = Command::new(&wt)
+        .current_dir(project_dir)
+        .args(["switch", branch, "-y"])
+        .status();
+
+    // If branch doesn't exist, create it
+    if matches!(status, Ok(s) if !s.success()) || status.is_err() {
+        let status = Command::new(&wt)
+            .current_dir(project_dir)
+            .args(["switch", "--create", branch, "-y"])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("wt switch --create failed for branch: {}", branch);
+        }
+    }
+
+    // Resolve worktree path via `wt list --format=json`
+    let worktree_output = Command::new(&wt)
+        .current_dir(project_dir)
+        .args(["list", "--format=json"])
+        .output()?;
+    let worktree_dir = if worktree_output.status.success() {
+        serde_json::from_slice::<Vec<serde_json::Value>>(&worktree_output.stdout)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|e| e.get("branch").and_then(|b| b.as_str()) == Some(branch))
+                    .and_then(|e| e.get("path"))
+                    .and_then(|p| p.as_str())
+                    .map(std::path::PathBuf::from)
+            })
+            .unwrap_or_else(|| project_dir.to_path_buf())
+    } else {
+        project_dir.to_path_buf()
+    };
+
+    // Fresh script is what headless-zellij uses as SHELL
+    let fresh_script = script_dir.join(format!("{}-fresh.sh", session_name));
+
+    // Spawn headless zellij with working directory
+    // Strip env vars that prevent nested zellij/claude sessions
+    let headless = headless_zellij_bin();
+    let status = Command::new("env")
+        .args([
+            "-u", "ZELLIJ",
+            "-u", "ZELLIJ_SESSION_NAME",
+            "-u", "CLAUDECODE",
+            "-u", "CLAUDE_CODE_ENTRYPOINT",
+        ])
+        .arg("python3")
+        .arg(&headless)
+        .arg(&session_name)
+        .arg(fresh_script.to_str().unwrap())
+        .arg(worktree_dir.to_str().unwrap())
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("headless-zellij failed for session: {}", session_name);
+    }
+
+    Ok(())
 }
 
 /// Attach to existing zellij session in current terminal (blocks)

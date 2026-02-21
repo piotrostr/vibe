@@ -11,7 +11,7 @@ use crate::external::{
     count_active_sessions, edit_markdown, get_all_open_prs, get_pr_for_branch,
     launch_prime_session, launch_zellij_claude_in_worktree,
     launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
-    prime_session_name,
+    prime_session_name, rapporting_instructions,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
 use crate::state::{
@@ -1428,6 +1428,12 @@ impl App {
             {
                 context.push_str(&format!("\n\nDescription:\n{}", desc));
             }
+            context.push_str(&format!("\n\nBranch: {}", branch));
+            if let Some(pr_info) = self.state.worktrees.branch_prs.get(&branch) {
+                context.push_str(&format!("\nPR: {} ({})", pr_info.url, pr_info.state));
+            }
+            context.push_str("\n\nRun `just setup` if available to initialize the worktree environment.");
+            context.push_str(&rapporting_instructions(self.storage.project_name()));
             context
         };
 

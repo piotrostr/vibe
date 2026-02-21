@@ -14,7 +14,8 @@ mod terminal;
 mod ui;
 
 use app::App;
-use external::{AssistantCli, LinearClient};
+use external::{AssistantCli, LinearClient, launch_headless_in_worktree, rapporting_instructions};
+use state::task_title_to_branch;
 use storage::TaskStorage;
 use terminal::Terminal;
 
@@ -41,6 +42,10 @@ enum Command {
         /// Task description (context, schedule, details)
         #[arg(short, long)]
         description: Option<String>,
+
+        /// Immediately spawn a Claude session for the task
+        #[arg(long)]
+        gas_it: bool,
     },
     /// Import a task from a markdown file
     Import {
@@ -54,14 +59,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Command::Create { title, description }) => {
+        Some(Command::Create {
+            title,
+            description,
+            gas_it,
+        }) => {
             let storage = TaskStorage::from_cwd()?;
+            let project_name = storage.project_name().to_string();
 
             // Check for project-specific Linear API key
-            let project = storage.project_name().to_uppercase().replace('-', "_");
+            let project = project_name.to_uppercase().replace('-', "_");
             let env_var = format!("{}_LINEAR_API_KEY", project);
 
-            if let Ok(api_key) = std::env::var(&env_var) {
+            let (linear_id, task_desc) = if let Ok(api_key) = std::env::var(&env_var) {
                 let client = LinearClient::new(api_key);
                 let created = client
                     .create_issue(&title, description.as_deref())
@@ -78,10 +88,44 @@ async fn main() -> Result<()> {
                 let task = storage.create_task_from_linear(&linear_issue)?;
                 println!("Created: {} [{}]", task.title, created.identifier);
                 println!("  {}", created.url);
+                (Some(created.identifier), task.description)
             } else {
                 let task = storage.create_task(&title, description.as_deref())?;
                 println!("Created: {}", task.title);
+                (None, task.description)
+            };
+
+            if gas_it {
+                let project_dir = std::env::current_dir()?;
+                let branch = task_title_to_branch(&title, linear_id.as_deref());
+
+                let mut context = format!("Task: {}", title);
+                if let Some(desc) = &task_desc
+                    && !desc.is_empty()
+                {
+                    context.push_str(&format!("\n\nDescription:\n{}", desc));
+                }
+                context.push_str(&format!("\n\nBranch: {}", branch));
+                context.push_str("\n\nRun `just setup` if available to initialize the worktree environment.");
+                context.push_str(&rapporting_instructions(&project_name));
+
+                let assistant = if cli.codex {
+                    AssistantCli::Codex
+                } else {
+                    AssistantCli::Claude
+                };
+
+                println!("Launching session...");
+                launch_headless_in_worktree(
+                    &branch,
+                    &context,
+                    assistant,
+                    &project_dir,
+                )?;
+                println!("Session spawned headlessly. Attach with: zellij attach {}",
+                    external::session_name_for_branch(&branch));
             }
+
             Ok(())
         }
         Some(Command::Import { file }) => {

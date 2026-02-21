@@ -65,6 +65,11 @@ enum Command {
         /// Specific session or ticket ID to clean up (e.g. VIB-21). Omit for all dead sessions.
         target: Option<String>,
     },
+    /// Spawn a Claude session for an existing task
+    Gas {
+        /// Task identifier: Linear ID (VIB-23), task title substring, or UUID
+        target: String,
+    },
     /// Show Linear board state grouped by column
     Status,
 }
@@ -224,6 +229,61 @@ async fn main() -> Result<()> {
         }
         Some(Command::Cleanup { target }) => {
             cmd_cleanup(target.as_deref())?;
+            Ok(())
+        }
+        Some(Command::Gas { target }) => {
+            let storage = TaskStorage::from_cwd()?;
+            let project_name = storage.project_name().to_string();
+            let tasks = storage.list_tasks()?;
+
+            // Match by linear ID, title substring, or UUID
+            let upper = target.to_uppercase();
+            let task = tasks
+                .iter()
+                .find(|t| {
+                    t.linear_issue_id
+                        .as_ref()
+                        .is_some_and(|id| id.to_uppercase() == upper)
+                })
+                .or_else(|| {
+                    tasks.iter().find(|t| t.id == target)
+                })
+                .or_else(|| {
+                    tasks
+                        .iter()
+                        .find(|t| t.title.to_uppercase().contains(&upper))
+                })
+                .ok_or_else(|| anyhow::anyhow!("no task matching '{}'", target))?;
+
+            let branch = task_title_to_branch(&task.title, task.linear_issue_id.as_deref());
+
+            let mut context = format!("Task: {}", task.title);
+            if let Some(desc) = &task.description
+                && !desc.is_empty()
+            {
+                context.push_str(&format!("\n\nDescription:\n{}", desc));
+            }
+            context.push_str(&format!("\n\nBranch: {}", branch));
+            context.push_str(
+                "\n\nRun `just setup` if available to initialize the worktree environment.",
+            );
+            context.push_str(&rapporting_instructions(&project_name));
+
+            let assistant = if cli.codex {
+                AssistantCli::Codex
+            } else {
+                AssistantCli::Claude
+            };
+
+            println!("Gassing: {} {}",
+                task.linear_issue_id.as_deref().unwrap_or(""),
+                task.title);
+            launch_headless_in_worktree(&branch, &context, assistant, &std::env::current_dir()?)?;
+            println!(
+                "Session spawned. Attach with: zellij attach {}",
+                external::session_name_for_branch(&branch)
+            );
+
             Ok(())
         }
         Some(Command::Status) => {

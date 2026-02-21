@@ -529,6 +529,93 @@ pub fn prime_session_name(project_name: &str) -> String {
     super::sanitize_session_name(&format!("{}.prime", project_name))
 }
 
+fn headless_zellij_bin() -> String {
+    dirs::home_dir()
+        .map(|h| h.join(".vibe/bin/headless-zellij"))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "headless-zellij".to_string())
+}
+
+/// Launch a Claude session headlessly in a worktree (no TTY required).
+/// Creates the worktree via `wt`, then spawns zellij in the background with a pseudo-TTY.
+pub fn launch_headless_in_worktree(
+    branch: &str,
+    task_context: &str,
+    assistant: AssistantCli,
+    project_dir: &std::path::Path,
+) -> Result<()> {
+    let session_name = super::session_name_for_branch(branch);
+    let wt = wt_binary();
+
+    if !std::path::Path::new(&wt).exists() {
+        anyhow::bail!("wt binary not found at: {}", wt);
+    }
+    if !project_dir.exists() {
+        anyhow::bail!("project_dir does not exist: {:?}", project_dir);
+    }
+
+    // Write task context to file
+    let script_dir = dirs::cache_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("vibe-scripts");
+    std::fs::create_dir_all(&script_dir)?;
+
+    let context_file = script_dir.join(format!("{}-context.txt", session_name));
+    std::fs::write(&context_file, task_context)?;
+
+    let (fresh_cmd, continue_cmd) = commands_with_context(assistant, false, &context_file);
+    let _launcher = create_launcher_script(&session_name, &fresh_cmd, &continue_cmd, false)?;
+
+    // Create worktree (wt switch without -x, just ensure worktree exists)
+    let status = Command::new(&wt)
+        .current_dir(project_dir)
+        .args(["switch", branch, "-y"])
+        .status();
+
+    // If branch doesn't exist, create it
+    if matches!(status, Ok(s) if !s.success()) || status.is_err() {
+        let status = Command::new(&wt)
+            .current_dir(project_dir)
+            .args(["switch", "--create", branch, "-y"])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("wt switch --create failed for branch: {}", branch);
+        }
+    }
+
+    // Resolve worktree path
+    let worktree_output = Command::new(&wt)
+        .current_dir(project_dir)
+        .args(["list", "--porcelain"])
+        .output()?;
+    let worktree_list = String::from_utf8_lossy(&worktree_output.stdout);
+    let worktree_dir = worktree_list
+        .lines()
+        .find(|l| l.contains(branch))
+        .and_then(|l| l.split_whitespace().next())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| project_dir.to_path_buf());
+
+    // Fresh script is what headless-zellij uses as SHELL
+    let fresh_script = script_dir.join(format!("{}-fresh.sh", session_name));
+
+    // Spawn headless zellij
+    let headless = headless_zellij_bin();
+    let status = Command::new("python3")
+        .arg(&headless)
+        .arg(&session_name)
+        .arg(fresh_script.to_str().unwrap())
+        .current_dir(&worktree_dir)
+        .status()?;
+
+    if !status.success() {
+        anyhow::bail!("headless-zellij failed for session: {}", session_name);
+    }
+
+    Ok(())
+}
+
 /// Attach to existing zellij session in current terminal (blocks)
 /// Handles dead sessions by force-resurrecting them
 pub fn attach_zellij_foreground(session_name: &str) -> Result<()> {

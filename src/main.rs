@@ -14,10 +14,7 @@ mod terminal;
 mod ui;
 
 use app::App;
-use external::{
-    AssistantCli, LinearClient, launch_zellij_claude_in_worktree_with_context,
-    rapporting_instructions,
-};
+use external::{AssistantCli, LinearClient, launch_headless_in_worktree, rapporting_instructions};
 use state::task_title_to_branch;
 use storage::TaskStorage;
 use terminal::Terminal;
@@ -117,13 +114,14 @@ async fn main() -> Result<()> {
                 };
 
                 println!("Launching session...");
-                launch_zellij_claude_in_worktree_with_context(
+                launch_headless_in_worktree(
                     &branch,
                     &context,
                     assistant,
-                    false,
                     &project_dir,
                 )?;
+                println!("Session spawned headlessly. Attach with: zellij attach {}",
+                    external::session_name_for_branch(&branch));
             }
 
             Ok(())

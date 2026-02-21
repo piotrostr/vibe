@@ -153,7 +153,14 @@ impl LinearClient {
         let team_id = self.get_default_team_id().await?;
 
         let desc_value = description
-            .map(|d| format!(r#""{}""#, d.replace('"', "\\\"")))
+            .map(|d| {
+                format!(
+                    r#""{}""#,
+                    d.replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('\n', "\\n")
+                )
+            })
             .unwrap_or_else(|| "null".to_string());
 
         let query = format!(

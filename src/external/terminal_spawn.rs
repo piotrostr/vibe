@@ -621,6 +621,10 @@ fn spawn_headless_via_launchd(
         <string>{path}</string>
         <key>HOME</key>
         <string>{home}</string>
+        <key>TERM</key>
+        <string>xterm-256color</string>
+        <key>COLORTERM</key>
+        <string>truecolor</string>
     </dict>
 </dict>
 </plist>"#,

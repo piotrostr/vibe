@@ -7,11 +7,14 @@ Creates a detached zellij session running the given shell as SHELL.
 Attach with `zellij attach <name>`.
 """
 
+import fcntl
 import os
 import pty
+import struct
 import subprocess
 import sys
 import signal
+import termios
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 flags = [a for a in sys.argv[1:] if a.startswith("--")]
@@ -29,8 +32,16 @@ cwd = args[2] if len(args) > 2 else None
 
 master, slave = pty.openpty()
 
+# Set terminal size large enough that zellij/claude never feels cramped.
+# When you attach, zellij resizes to your real terminal anyway - this just
+# sets the initial headless dimensions.
+COLS, ROWS = 220, 150
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+
 env = os.environ.copy()
 env["SHELL"] = shell_script
+env["TERM"] = "xterm-256color"
+env["COLORTERM"] = "truecolor"
 # Strip env vars that prevent nested zellij/claude sessions
 env.pop("ZELLIJ", None)
 env.pop("ZELLIJ_SESSION_NAME", None)

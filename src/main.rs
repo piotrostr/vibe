@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::fs::OpenOptions;
 use std::path::PathBuf;
@@ -51,6 +51,14 @@ enum Command {
     Import {
         /// Path to markdown file (filename becomes title, contents become description)
         file: PathBuf,
+
+        /// Override task title (default: derived from filename)
+        #[arg(short, long)]
+        title: Option<String>,
+
+        /// Immediately spawn a Claude session for the task
+        #[arg(long)]
+        gas_it: bool,
     },
     /// Tear down finished sessions (launchd + zellij + worktree)
     Cleanup {
@@ -135,10 +143,83 @@ async fn main() -> Result<()> {
 
             Ok(())
         }
-        Some(Command::Import { file }) => {
+        Some(Command::Import { file, title: title_override, gas_it }) => {
             let storage = TaskStorage::from_cwd()?;
-            let task = storage.create_task_from_file(&file)?;
-            println!("Created: {}", task.title);
+            let project_name = storage.project_name().to_string();
+
+            let content = std::fs::read_to_string(&file)
+                .with_context(|| format!("Failed to read file: {:?}", file))?;
+            let title = title_override.unwrap_or_else(|| {
+                file.file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("untitled")
+                    .replace(['-', '_'], " ")
+            });
+            let description = if content.trim().is_empty() {
+                None
+            } else {
+                Some(content)
+            };
+
+            // Route through Linear if API key is set
+            let project = project_name.to_uppercase().replace('-', "_");
+            let env_var = format!("{}_LINEAR_API_KEY", project);
+
+            let (linear_id, task_desc) = if let Ok(api_key) = std::env::var(&env_var) {
+                let client = LinearClient::new(api_key);
+                let created = client
+                    .create_issue(&title, description.as_deref())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Linear: {}", e))?;
+
+                let linear_issue = external::LinearIssue {
+                    identifier: created.identifier.clone(),
+                    title: title.clone(),
+                    description: description.clone(),
+                    url: created.url.clone(),
+                    labels: vec![],
+                };
+                let task = storage.create_task_from_linear(&linear_issue)?;
+                println!("Created: {} [{}]", task.title, created.identifier);
+                println!("  {}", created.url);
+                (Some(created.identifier), task.description)
+            } else {
+                let task = storage.create_task(&title, description.as_deref())?;
+                println!("Created: {}", task.title);
+                (None, task.description)
+            };
+
+            if gas_it {
+                let project_dir = std::env::current_dir()?;
+                let branch = task_title_to_branch(&title, linear_id.as_deref());
+
+                let mut context = format!("Task: {}", title);
+                if let Some(desc) = &task_desc
+                    && !desc.is_empty()
+                {
+                    context.push_str(&format!("\n\nDescription:\n{}", desc));
+                }
+                context.push_str(&format!("\n\nBranch: {}", branch));
+                context.push_str("\n\nRun `just setup` if available to initialize the worktree environment.");
+                context.push_str(&rapporting_instructions(&project_name));
+
+                let assistant = if cli.codex {
+                    AssistantCli::Codex
+                } else {
+                    AssistantCli::Claude
+                };
+
+                println!("Launching session...");
+                launch_headless_in_worktree(
+                    &branch,
+                    &context,
+                    assistant,
+                    &project_dir,
+                )?;
+                println!("Session spawned headlessly. Attach with: zellij attach {}",
+                    external::session_name_for_branch(&branch));
+            }
+
             Ok(())
         }
         Some(Command::Cleanup { target }) => {

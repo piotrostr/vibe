@@ -57,6 +57,8 @@ enum Command {
         /// Specific session or ticket ID to clean up (e.g. VIB-21). Omit for all dead sessions.
         target: Option<String>,
     },
+    /// Show Linear board state grouped by column
+    Status,
 }
 
 #[tokio::main]
@@ -141,6 +143,10 @@ async fn main() -> Result<()> {
         }
         Some(Command::Cleanup { target }) => {
             cmd_cleanup(target.as_deref())?;
+            Ok(())
+        }
+        Some(Command::Status) => {
+            cmd_status().await?;
             Ok(())
         }
         None => {
@@ -242,6 +248,46 @@ fn cmd_cleanup(target: Option<&str>) -> Result<()> {
     }
 
     println!("cleaned {} session(s)", sessions.len());
+    Ok(())
+}
+
+async fn cmd_status() -> Result<()> {
+    let storage = TaskStorage::from_cwd()?;
+    let project = storage
+        .project_name()
+        .to_uppercase()
+        .replace('-', "_");
+    let env_var = format!("{}_LINEAR_API_KEY", project);
+
+    let api_key = std::env::var(&env_var)
+        .map_err(|_| anyhow::anyhow!("{} not set", env_var))?;
+
+    let client = LinearClient::new(api_key);
+    let issues = client
+        .fetch_assigned_issues()
+        .await
+        .map_err(|e| anyhow::anyhow!("Linear: {}", e))?;
+
+    // Group by state type in board order
+    let columns = ["started", "unstarted", "backlog", "completed"];
+
+    for col in &columns {
+        let group: Vec<_> = issues.iter().filter(|i| i.state_type == *col).collect();
+        if group.is_empty() {
+            continue;
+        }
+        let label = group.first().map(|i| i.state_name.as_str()).unwrap_or(col);
+        println!("\n  {} ({})", label, group.len());
+        let show = if *col == "completed" { 3 } else { group.len() };
+        for issue in group.iter().take(show) {
+            println!("    {} {}", issue.identifier, issue.title);
+        }
+        if group.len() > show {
+            println!("    ...");
+        }
+    }
+    println!();
+
     Ok(())
 }
 

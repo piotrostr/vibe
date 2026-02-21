@@ -52,6 +52,14 @@ struct IssueNode {
     description: Option<String>,
     url: String,
     labels: Option<LabelConnection>,
+    state: Option<StateNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StateNode {
+    name: String,
+    #[serde(rename = "type")]
+    state_type: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +77,14 @@ struct LabelNode {
 pub struct CreatedIssue {
     pub identifier: String,
     pub url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinearBoardIssue {
+    pub identifier: String,
+    pub title: String,
+    pub state_name: String,
+    pub state_type: String, // backlog, unstarted, started, completed, cancelled
 }
 
 pub struct LinearClient {
@@ -405,6 +421,88 @@ impl LinearClient {
         }
 
         Ok(statuses)
+    }
+
+    /// Fetch all non-cancelled issues assigned to the API key owner
+    pub async fn fetch_assigned_issues(&self) -> Result<Vec<LinearBoardIssue>, String> {
+        let query = r#"
+            query {
+                viewer {
+                    assignedIssues(
+                        filter: { state: { type: { neq: "cancelled" } } }
+                        orderBy: updatedAt
+                        first: 100
+                    ) {
+                        nodes {
+                            identifier
+                            title
+                            description
+                            url
+                            state { name type }
+                            labels { nodes { name } }
+                        }
+                    }
+                }
+            }
+        "#;
+
+        let body = serde_json::json!({ "query": query });
+
+        let response = self
+            .http
+            .post(Self::API_URL)
+            .header("Authorization", &self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(format!(
+                "HTTP {}: {}",
+                status.as_u16(),
+                text.chars().take(200).collect::<String>()
+            ));
+        }
+
+        let result: GraphQLResponse<ViewerData> = response
+            .json()
+            .await
+            .map_err(|e| format!("JSON parse error: {}", e))?;
+
+        if let Some(errors) = result.errors {
+            let msg = errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!("GraphQL error: {}", msg));
+        }
+
+        let data = result.data.ok_or("No data in response")?;
+        let nodes = data
+            .viewer
+            .assigned_issues
+            .map(|c| c.nodes)
+            .unwrap_or_default();
+
+        Ok(nodes
+            .into_iter()
+            .map(|node| {
+                let (state_name, state_type) = node
+                    .state
+                    .map(|s| (s.name, s.state_type))
+                    .unwrap_or_else(|| ("Unknown".to_string(), "unknown".to_string()));
+                LinearBoardIssue {
+                    identifier: node.identifier,
+                    title: node.title,
+                    state_name,
+                    state_type,
+                }
+            })
+            .collect())
     }
 }
 

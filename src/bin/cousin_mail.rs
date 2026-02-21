@@ -52,6 +52,95 @@ fn list_zellij_sessions() -> Vec<String> {
         .collect()
 }
 
+/// Full session info (name, age, alive/exited) from zellij list-sessions
+fn list_zellij_sessions_full() -> Vec<(String, String, bool)> {
+    let Ok(output) = Command::new("zellij").args(["list-sessions"]).output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    // Strip ANSI codes
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let stripped = strip_ansi(&raw);
+    stripped
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|line| {
+            let name = line.split_whitespace().next().unwrap_or("").to_string();
+            let exited = line.contains("EXITED");
+            // Extract the age from [Created ...ago]
+            let age = line
+                .find("[Created ")
+                .and_then(|start| {
+                    let rest = &line[start + 9..];
+                    rest.find(']').map(|end| rest[..end].trim().to_string())
+                })
+                .unwrap_or_default();
+            (name, age, !exited)
+        })
+        .collect()
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // skip until we hit a letter (end of ANSI sequence)
+            while let Some(&next) = chars.peek() {
+                chars.next();
+                if next.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+fn cmd_list() -> ExitCode {
+    let project = match project_name() {
+        Some(p) => p,
+        None => {
+            eprintln!("could not determine project name from git remote");
+            return ExitCode::FAILURE;
+        }
+    };
+    let prime_name = sanitize_session_name(&format!("{}.prime", &project));
+    let sessions = list_zellij_sessions_full();
+
+    // Match sessions by full project name OR Linear ticket prefix (first 3 chars).
+    // "vibe" matches "vibe-prime" and "VIB-21-...", "reflex" matches "reflex-prime" and "REF-123-..."
+    let project_upper = project.to_uppercase();
+    let ticket_prefix = format!("{}-", &project_upper[..project_upper.len().min(3)]);
+    let cousins: Vec<_> = sessions
+        .iter()
+        .filter(|(name, _, alive)| {
+            let upper = name.to_uppercase();
+            *alive && (upper.starts_with(&project_upper) || upper.starts_with(&ticket_prefix))
+        })
+        .collect();
+
+    if cousins.is_empty() {
+        eprintln!("no active cousins for project '{}'", project);
+        return ExitCode::SUCCESS;
+    }
+
+    for (name, age, _) in &cousins {
+        let role = if *name == prime_name {
+            " (prime)"
+        } else {
+            ""
+        };
+        println!("  {}{} - {}", name, role, age);
+    }
+
+    ExitCode::SUCCESS
+}
+
 fn resolve_target(target: &str) -> Result<String, String> {
     // "prime" -> sanitize("{project}.prime") -> e.g. "vibe-prime"
     if target == "prime" {
@@ -141,8 +230,13 @@ fn main() -> ExitCode {
         }
     }
 
+    if positional.first().map(|s| *s) == Some("list") {
+        return cmd_list();
+    }
+
     if positional.len() < 2 {
-        eprintln!("usage: cousin-mail [--urgent] <target> <message...>");
+        eprintln!("usage: cousin [--urgent] <target> <message...>");
+        eprintln!("       cousin list");
         eprintln!("  target: prime | TICKET-ID | session-name");
         eprintln!("  --urgent: send Ctrl+C before message to interrupt target");
         return ExitCode::FAILURE;
@@ -223,8 +317,8 @@ mod tests {
 
     #[test]
     fn test_arg_parsing_urgent_flag() {
-        // simulate: cousin-mail --urgent prime hello
-        let args = vec!["cousin-mail", "--urgent", "prime", "hello"];
+        // simulate: cousin --urgent prime hello
+        let args = vec!["cousin", "--urgent", "prime", "hello"];
         let mut urgent = false;
         let mut positional: Vec<&str> = Vec::new();
         for arg in &args[1..] {
@@ -240,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_arg_parsing_no_flag() {
-        let args = vec!["cousin-mail", "prime", "hello", "world"];
+        let args = vec!["cousin", "prime", "hello", "world"];
         let mut urgent = false;
         let mut positional: Vec<&str> = Vec::new();
         for arg in &args[1..] {

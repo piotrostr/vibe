@@ -15,7 +15,7 @@ name = "vibe-migrate"
 path = "src/bin/migrate.rs"
 
 [[bin]]
-name = "cousin-mail"
+name = "cousin"
 path = "src/bin/cousin_mail.rs"
 
 [lints.clippy]

@@ -453,29 +453,23 @@ fn prime_prompt(project_name: &str) -> String {
 
 /// Rapporting instructions appended to worker task context.
 /// Tells the worker how to report back to the prime session.
-pub fn rapporting_instructions(project_name: &str) -> String {
-    let prime_session = super::sanitize_session_name(&format!("{}.prime", project_name));
+pub fn rapporting_instructions(_project_name: &str) -> String {
     format!(
         "\n---\n\
-         Prime coordination: report to the prime session when you complete, get blocked, or hit a milestone.\n\
-         Also reply via the same channel when prime checks in on you.\n\
+         You have a CLI called `cousin` for talking to other Claude sessions.\n\
          \n\
-         Done:     zellij -s {prime} action write-chars '[DONE] <1-line summary>' && \
-         zellij -s {prime} action write 13\n\
-         Blocked:  zellij -s {prime} action write-chars '[BLOCKED] <what you need>' && \
-         zellij -s {prime} action write 13\n\
-         Progress: zellij -s {prime} action write-chars '[PROGRESS] <milestone>' && \
-         zellij -s {prime} action write 13\n\
-         Reply:    zellij -s {prime} action write-chars '<your response>' && \
-         zellij -s {prime} action write 13\n\
+         Report to prime:\n\
+         cousin prime \"[DONE] one-line summary, PR #N\"\n\
+         cousin prime \"[BLOCKED] what you need\"\n\
+         cousin prime \"[PROGRESS] milestone\"\n\
          \n\
-         When prime messages you (check-ins, questions, feedback), always respond back through \
-         write-chars. Prime can't see your screen - the only way to communicate is through this channel.\n\
+         When prime messages you, always reply: cousin prime \"your response\"\n\
+         See who's around: cousin list\n\
          \n\
-         IMPORTANT: You own ONE ticket on ONE branch. Do not start new tickets or features on this branch.\n\
-         When you are done, report [DONE] and stop. New work gets its own worktree and session - \
-         prime handles that. This keeps everything atomic: one ticket = one branch = one worktree.",
-        prime = prime_session,
+         You own ONE ticket on ONE branch. When done, report [DONE] and stop.\n\
+         New work gets its own worktree - prime handles that.\n\
+         \n\
+         For the full protocol, run: cat ~/.claude/skills/vibe/SKILL.md",
     )
 }
 

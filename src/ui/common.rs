@@ -118,6 +118,11 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
                     Style::default().fg(Color::DarkGray),
                 ));
             }
+            spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                env!("GIT_HASH"),
+                Style::default().fg(Color::DarkGray),
+            ));
         }
 
         lines.push(Line::from(spans));

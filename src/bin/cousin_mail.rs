@@ -101,6 +101,34 @@ fn strip_ansi(s: &str) -> String {
     result
 }
 
+/// Extract ticket prefixes (e.g. "AMB-", "VIB-") from worktree branch names
+fn ticket_prefixes_from_worktrees() -> Vec<String> {
+    let Ok(output) = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let mut prefixes = std::collections::HashSet::new();
+    for line in raw.lines() {
+        if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+            // Branch like "AMB-926/token-metadata" -> prefix "AMB-"
+            if let Some(pos) = branch.find('-') {
+                let before = &branch[..pos];
+                if !before.is_empty() && before.chars().all(|c| c.is_ascii_alphabetic()) {
+                    // Check that after the dash there are digits (ticket pattern)
+                    let after = &branch[pos + 1..];
+                    if after.starts_with(|c: char| c.is_ascii_digit()) {
+                        prefixes.insert(format!("{}-", before.to_uppercase()));
+                    }
+                }
+            }
+        }
+    }
+    prefixes.into_iter().collect()
+}
+
 fn cmd_list() -> ExitCode {
     let project = match project_name() {
         Some(p) => p,
@@ -112,15 +140,16 @@ fn cmd_list() -> ExitCode {
     let prime_name = sanitize_session_name(&format!("{}.prime", &project));
     let sessions = list_zellij_sessions_full();
 
-    // Match sessions by full project name OR Linear ticket prefix (first 3 chars).
-    // "vibe" matches "vibe-prime" and "VIB-21-...", "reflex" matches "reflex-prime" and "REF-123-..."
+    // Match sessions by project name OR ticket prefixes from actual worktree branches
     let project_upper = project.to_uppercase();
-    let ticket_prefix = format!("{}-", &project_upper[..project_upper.len().min(3)]);
+    let ticket_prefixes = ticket_prefixes_from_worktrees();
     let cousins: Vec<_> = sessions
         .iter()
         .filter(|(name, _, alive)| {
             let upper = name.to_uppercase();
-            *alive && (upper.starts_with(&project_upper) || upper.starts_with(&ticket_prefix))
+            *alive
+                && (upper.starts_with(&project_upper)
+                    || ticket_prefixes.iter().any(|p| upper.starts_with(p)))
         })
         .collect();
 
@@ -355,5 +384,16 @@ mod tests {
         }
         assert!(!urgent);
         assert_eq!(positional, vec!["prime", "hello", "world"]);
+    }
+
+    #[test]
+    fn test_ticket_prefixes_from_worktrees() {
+        // This project has VIB-* branches in worktrees
+        let prefixes = ticket_prefixes_from_worktrees();
+        assert!(
+            prefixes.contains(&"VIB-".to_string()),
+            "expected VIB- in {:?}",
+            prefixes
+        );
     }
 }

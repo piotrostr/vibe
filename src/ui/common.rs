@@ -155,6 +155,7 @@ fn render_header_compact(frame: &mut Frame, area: Rect, state: &AppState) {
         Span::styled(&title, Style::default().add_modifier(Modifier::BOLD)),
         Span::raw(" | "),
         status,
+        Span::raw(format!(" | {}", env!("GIT_HASH"))),
     ]))
     .block(Block::default().borders(Borders::BOTTOM));
 

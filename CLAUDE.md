@@ -1,6 +1,6 @@
 # vibe
 
-Terminal-based kanban board for managing Claude Code sessions with git worktrees.
+Multi-Claude orchestration system. Manages autonomous Claude Code sessions ("cousins") in isolated git worktrees, coordinated by a prime session. Includes a TUI kanban board, CLI tools, and inter-session communication.
 
 ## Version Control
 
@@ -34,45 +34,67 @@ cargo test
 cargo test test_slugify
 
 # Check/lint
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 cargo fmt --all
 ```
 
 Logs are written to `~/.vibe/vibe.log`.
 
-## TUI Architecture
+## CLI Commands
 
-The TUI is a Ratatui-based terminal app. It orchestrates Claude Code sessions within git worktrees via Zellij.
+```bash
+vibe                          # open the TUI kanban board
+vibe create --title "..." --description "..." [--gas-it]  # create ticket (+ spawn cousin)
+vibe gas VIB-23               # spawn cousin for existing task (by Linear ID, title, or UUID)
+vibe import plan.md --title "..." [--gas-it]  # import markdown plan as task (+ spawn cousin)
+vibe status                   # show Linear board state grouped by column
+vibe cleanup [target]         # tear down finished sessions (launchd + zellij)
+cousin list                   # list active cousins for this project
+cousin <target> <message>     # send message to a cousin (prime, ticket ID, or session name)
+cousin --urgent <target> <msg> # Ctrl+C interrupt then send
+```
 
-### Core Loop (`app.rs`)
+## Orchestration Model
+
+- **Prime**: coordinator session. Plans with Piotr, spawns cousins, reviews PRs, tracks progress.
+- **Cousin**: worker session. One ticket = one branch = one worktree = one session. Reports [DONE]/[BLOCKED]/[PROGRESS] to prime via `cousin` CLI.
+- **Atomic model**: cousins never reuse branches or take on new tickets. When done, they stop.
+
+Sessions are spawned headlessly via launchd (escapes Claude Code sandbox). Prime attaches interactively via `zellij attach`. Full protocol in `~/.claude/skills/vibe/SKILL.md`.
+
+## Architecture
+
+### TUI (`app.rs`)
 
 The `App` struct owns all state and runs the main loop:
 1. Poll background channels for worktree/session/PR updates
 2. Render current view
 3. Handle keyboard input via action dispatch
-4. Exit on quit action
 
 Background loading uses `tokio::task::spawn_blocking` with mpsc channels to avoid blocking the UI thread.
 
 ### Module Structure
 
 - **state/** - View state for each screen (kanban, tasks, worktrees, sessions, search, logs). `AppState` in `app_state.rs` aggregates all view states.
-- **input/** - `keybindings.rs` maps keys to `Action` enum based on current view. View-specific bindings in separate functions.
+- **input/** - `keybindings.rs` maps keys to `Action` enum based on current view.
 - **ui/** - Ratatui rendering functions. One file per view (kanban.rs, worktrees.rs, etc.).
 - **storage/** - File-based task storage. Tasks are markdown files in `~/.vibe/projects/{project}/tasks/` with YAML frontmatter.
 - **external/** - Shell-out wrappers:
   - `zellij.rs` - Session listing, attach, kill, attention detection
   - `worktrunk.rs` - `wt` CLI wrapper for worktree management
-  - `terminal_spawn.rs` - Session launch logic with `wt switch -x`
+  - `terminal_spawn.rs` - Session launch logic, launchd headless spawn, prime launch
+  - `linear.rs` - Linear GraphQL API (create issues, fetch board state)
   - `gh.rs` - GitHub CLI for PR info
   - `editor.rs` - External editor invocation
+- **`src/bin/cousin_mail.rs`** - `cousin` CLI binary for inter-session IPC via zellij write-chars
+- **`src/bin/headless-zellij.py`** - Python PTY holder that keeps headless sessions attached
 
-### Session Launch Flow
+### Headless Session Spawn Flow
 
-1. Task selected -> derive branch name from title
-2. Create launcher script that handles session state (new/running/EXITED)
-3. Call `wt switch [--create] branch -x launcher.sh` from project directory
-4. `wt` switches to worktree, runs launcher which starts/attaches Zellij with Claude
+1. Create launcher shell script in `~/.vibe/cache/vibe-scripts/`
+2. Write launchd plist to `~/Library/Caches/vibe-launchd/`
+3. `launchctl load` spawns headless-zellij.py as child of PID 1 (outside Claude Code sandbox)
+4. headless-zellij.py creates a PTY and holds it so zellij write-chars can reach the session
 
 ### Key Bindings
 
@@ -97,8 +119,13 @@ Description here...
 
 Tasks stored at `~/.vibe/projects/{cwd_dirname}/tasks/`.
 
+## Environment Variables
+
+- `{PROJECT}_LINEAR_API_KEY` - Linear API key (e.g. `VIBE_LINEAR_API_KEY`, `MYPROJECT_LINEAR_API_KEY`)
+
 ## Dependencies
 
 - `wt` CLI (worktrunk) - must be installed at `~/.cargo/bin/wt` or set `WORKTRUNK_BIN`
 - `zellij` - terminal multiplexer for Claude sessions
 - `gh` CLI - optional, for PR status
+- `python3` - for headless-zellij.py PTY holder

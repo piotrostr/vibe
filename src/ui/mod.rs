@@ -11,3 +11,7 @@ pub use logs::*;
 pub use search::*;
 pub use task_detail::*;
 pub use worktrees::*;
+
+use ratatui::style::Color;
+
+pub const ACCENT: Color = Color::Rgb(232, 145, 58);

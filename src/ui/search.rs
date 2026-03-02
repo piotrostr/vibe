@@ -24,12 +24,12 @@ pub fn render_search(frame: &mut Frame, area: Rect, search: &SearchState) {
 
 fn render_search_input(frame: &mut Frame, area: Rect, search: &SearchState) {
     let input_line = Line::from(vec![
-        Span::styled("> ", Style::default().fg(Color::Cyan)),
+        Span::styled("> ", Style::default().fg(super::ACCENT)),
         Span::raw(&search.query),
         Span::styled(
             "_",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(super::ACCENT)
                 .add_modifier(Modifier::SLOW_BLINK),
         ),
     ]);
@@ -38,7 +38,7 @@ fn render_search_input(frame: &mut Frame, area: Rect, search: &SearchState) {
         Block::default()
             .borders(Borders::ALL)
             .title(" Search ")
-            .border_style(Style::default().fg(Color::Cyan)),
+            .border_style(Style::default().fg(super::ACCENT)),
     );
 
     frame.render_widget(input, area);
@@ -115,7 +115,7 @@ fn render_preview(frame: &mut Frame, area: Rect, search: &SearchState) {
             lines.push(Line::from(""));
             lines.push(Line::from(vec![
                 Span::styled("PR: ", Style::default().fg(Color::Yellow)),
-                Span::styled(pr_url, Style::default().fg(Color::Cyan)),
+                Span::styled(pr_url, Style::default().fg(super::ACCENT)),
             ]));
             if let Some(ref status) = task.pr_status {
                 lines.push(Line::from(vec![

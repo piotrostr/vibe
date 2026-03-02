@@ -89,7 +89,7 @@ fn render_row(
     };
 
     let border_color = if is_selected {
-        Color::Cyan
+        super::ACCENT
     } else {
         Color::DarkGray
     };
@@ -142,7 +142,7 @@ fn render_row(
                         (Some("CHANGES_REQUESTED"), _) => ("[?]", Color::Yellow),
                         (_, Some("FAILURE")) => ("[✗]", Color::Red),
                         (_, Some("SUCCESS")) => ("[✓]", Color::Green),
-                        _ => ("[PR]", Color::Cyan),
+                        _ => ("[PR]", super::ACCENT),
                     },
                 };
                 spans.push(Span::styled(
@@ -210,7 +210,7 @@ fn render_row(
                                 _ => {
                                     spans.push(Span::styled(
                                         " [PR]",
-                                        Style::default().fg(Color::Cyan),
+                                        Style::default().fg(super::ACCENT),
                                     ));
                                 }
                             }

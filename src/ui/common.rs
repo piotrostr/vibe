@@ -61,7 +61,7 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
         let mut spans = vec![Span::styled(
             *logo_line,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(super::ACCENT)
                 .add_modifier(Modifier::BOLD),
         )];
 
@@ -323,7 +323,7 @@ pub fn render_help_modal(frame: &mut Frame, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .title(" Help ")
-            .border_style(Style::default().fg(Color::Cyan)),
+            .border_style(Style::default().fg(super::ACCENT)),
     );
 
     frame.render_widget(help, modal_area);

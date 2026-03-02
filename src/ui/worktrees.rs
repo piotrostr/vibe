@@ -76,7 +76,7 @@ pub fn render_worktrees(frame: &mut Frame, area: Rect, state: &WorktreesState) {
             // Style based on selection and state
             let base_style = if is_selected {
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(super::ACCENT)
                     .add_modifier(Modifier::BOLD)
             } else if wt.is_current {
                 Style::default().fg(Color::Green)
@@ -117,7 +117,7 @@ pub fn render_worktrees(frame: &mut Frame, area: Rect, state: &WorktreesState) {
         Block::default()
             .borders(Borders::ALL)
             .title(format!(" Worktrees ({}) ", state.worktrees.len()))
-            .border_style(Style::default().fg(Color::Cyan)),
+            .border_style(Style::default().fg(super::ACCENT)),
     );
 
     frame.render_widget(list, area);

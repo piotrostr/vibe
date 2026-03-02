@@ -74,7 +74,7 @@ pub fn render_task_detail(
     let title = Paragraph::new(Line::from(title_spans)).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
+            .border_style(Style::default().fg(super::ACCENT)),
     );
     frame.render_widget(title, chunks[chunk_idx]);
     chunk_idx += 1;
@@ -191,17 +191,17 @@ pub fn render_task_detail_with_actions(
 
     // Actions bar
     let actions = Paragraph::new(Line::from(vec![
-        Span::styled("[g]", Style::default().fg(Color::Cyan)),
+        Span::styled("[g]", Style::default().fg(super::ACCENT)),
         Span::raw(" Gas it  "),
-        Span::styled("[p]", Style::default().fg(Color::Cyan)),
+        Span::styled("[p]", Style::default().fg(super::ACCENT)),
         Span::raw(" Plan it  "),
-        Span::styled("[P]", Style::default().fg(Color::Cyan)),
+        Span::styled("[P]", Style::default().fg(super::ACCENT)),
         Span::raw(" View Plan  "),
-        Span::styled("[v]", Style::default().fg(Color::Cyan)),
+        Span::styled("[v]", Style::default().fg(super::ACCENT)),
         Span::raw(" View PR  "),
-        Span::styled("[e]", Style::default().fg(Color::Cyan)),
+        Span::styled("[e]", Style::default().fg(super::ACCENT)),
         Span::raw(" Edit  "),
-        Span::styled("[d]", Style::default().fg(Color::Cyan)),
+        Span::styled("[d]", Style::default().fg(super::ACCENT)),
         Span::raw(" Delete"),
     ]))
     .block(

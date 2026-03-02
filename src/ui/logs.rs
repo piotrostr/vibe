@@ -42,7 +42,7 @@ pub fn render_logs(frame: &mut Frame, area: Rect, logs: &LogsState) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(super::ACCENT)),
         )
         .wrap(Wrap { trim: false });
 
@@ -117,7 +117,7 @@ pub fn render_logs_overlay(frame: &mut Frame, area: Rect, logs: &LogsState) {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .border_style(Style::default().fg(Color::Cyan)),
+                .border_style(Style::default().fg(super::ACCENT)),
         )
         .wrap(Wrap { trim: false });
 

@@ -41,9 +41,9 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
     let linear_info = if let Some(ref name) = project_name {
         let env_var = linear_env_var_name(name);
         if state.linear_api_key_available {
-            Some((format!("Linear: {} set", env_var), Color::Green))
+            Some((env_var, "set", Color::Green))
         } else {
-            Some((format!("Linear: {} not set", env_var), Color::DarkGray))
+            Some((env_var, "not set", Color::DarkGray))
         }
     } else {
         None
@@ -69,23 +69,19 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
         if i == 0 {
             // Line 1: Process counts + loading indicator
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                format!("Claude: {}", claude_count),
-                Style::default().fg(if claude_count > 0 {
-                    Color::Green
-                } else {
-                    Color::DarkGray
-                }),
-            ));
+            if claude_count > 0 {
+                spans.push(Span::styled("Claude: ", Style::default().fg(Color::White)));
+                spans.push(Span::styled(format!("{}", claude_count), Style::default().fg(super::ACCENT)));
+            } else {
+                spans.push(Span::styled("Claude: 0", Style::default().fg(Color::DarkGray)));
+            }
             spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
-            spans.push(Span::styled(
-                format!("Zellij: {}", zellij_count),
-                Style::default().fg(if zellij_count > 0 {
-                    Color::Blue
-                } else {
-                    Color::DarkGray
-                }),
-            ));
+            if zellij_count > 0 {
+                spans.push(Span::styled("Zellij: ", Style::default().fg(Color::White)));
+                spans.push(Span::styled(format!("{}", zellij_count), Style::default().fg(Color::Green)));
+            } else {
+                spans.push(Span::styled("Zellij: 0", Style::default().fg(Color::DarkGray)));
+            }
             // Show loading indicator when refreshing
             if state.pr_loading || state.worktrees.loading || state.sessions.loading {
                 spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
@@ -96,22 +92,20 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
             }
         } else if i == 1 && !project_info.is_empty() {
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                &project_info,
-                Style::default().fg(Color::Yellow),
-            ));
+            spans.push(Span::styled("Project: ", Style::default().fg(Color::White)));
+            let project_name_display = project_info.strip_prefix("Project: ").unwrap_or(&project_info);
+            spans.push(Span::styled(project_name_display.to_string(), Style::default().fg(super::ACCENT)));
         } else if i == 2 {
-            if let Some((ref linear_text, linear_color)) = linear_info {
+            if let Some((ref env_var, status, label_color)) = linear_info {
                 spans.push(Span::raw("  "));
-                spans.push(Span::styled(linear_text, Style::default().fg(linear_color)));
+                spans.push(Span::styled("Linear: ", Style::default().fg(Color::White)));
+                spans.push(Span::styled(format!("{} {}", env_var, status), Style::default().fg(label_color)));
             }
             // Prime session indicator
             spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
             if state.prime_session_active {
-                spans.push(Span::styled(
-                    "Prime: active",
-                    Style::default().fg(Color::Green),
-                ));
+                spans.push(Span::styled("Prime: ", Style::default().fg(Color::White)));
+                spans.push(Span::styled("active", Style::default().fg(super::ACCENT)));
             } else {
                 spans.push(Span::styled(
                     "Prime: P to launch",

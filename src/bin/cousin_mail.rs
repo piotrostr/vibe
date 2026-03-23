@@ -39,7 +39,10 @@ fn sanitize_session_name(name: &str) -> String {
 }
 
 fn list_zellij_sessions() -> Vec<String> {
-    let Ok(output) = Command::new("zellij").args(["list-sessions", "-s"]).output() else {
+    let Ok(output) = Command::new("zellij")
+        .args(["list-sessions", "-s"])
+        .output()
+    else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -159,11 +162,7 @@ fn cmd_list() -> ExitCode {
     }
 
     for (name, age, _) in &cousins {
-        let role = if *name == prime_name {
-            " (prime)"
-        } else {
-            ""
-        };
+        let role = if *name == prime_name { " (prime)" } else { "" };
         println!("  {}{} - {}", name, role, age);
     }
 
@@ -218,7 +217,10 @@ fn send_interrupt(session: &str) -> Result<(), String> {
         .status()
         .map_err(|e| format!("failed to run zellij: {}", e))?;
     if !status.success() {
-        return Err(format!("zellij write (ctrl-c) failed for session '{}'", session));
+        return Err(format!(
+            "zellij write (ctrl-c) failed for session '{}'",
+            session
+        ));
     }
     // small delay so the target processes the interrupt before we type
     std::thread::sleep(std::time::Duration::from_millis(200));
@@ -240,7 +242,10 @@ fn send_message(session: &str, message: &str) -> Result<(), String> {
         .status()
         .map_err(|e| format!("failed to run zellij: {}", e))?;
     if !status.success() {
-        return Err(format!("zellij write-chars failed for session '{}'", session));
+        return Err(format!(
+            "zellij write-chars failed for session '{}'",
+            session
+        ));
     }
 
     // write 13 = Enter key
@@ -249,7 +254,10 @@ fn send_message(session: &str, message: &str) -> Result<(), String> {
         .status()
         .map_err(|e| format!("failed to run zellij: {}", e))?;
     if !status.success() {
-        return Err(format!("zellij write (enter) failed for session '{}'", session));
+        return Err(format!(
+            "zellij write (enter) failed for session '{}'",
+            session
+        ));
     }
 
     Ok(())
@@ -291,9 +299,7 @@ fn main() -> ExitCode {
         }
     };
 
-    if urgent
-        && let Err(e) = send_interrupt(&session)
-    {
+    if urgent && let Err(e) = send_interrupt(&session) {
         eprintln!("error: {}", e);
         return ExitCode::FAILURE;
     }

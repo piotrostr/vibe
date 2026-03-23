@@ -192,9 +192,11 @@ pub fn render_task_detail_with_actions(
     // Actions bar
     let actions = Paragraph::new(Line::from(vec![
         Span::styled("[g]", Style::default().fg(super::ACCENT)),
-        Span::raw(" Gas it  "),
+        Span::raw(" Gas  "),
+        Span::styled("[G]", Style::default().fg(super::ACCENT)),
+        Span::raw(" Gas+prime  "),
         Span::styled("[p]", Style::default().fg(super::ACCENT)),
-        Span::raw(" Plan it  "),
+        Span::raw(" Plan  "),
         Span::styled("[P]", Style::default().fg(super::ACCENT)),
         Span::raw(" View Plan  "),
         Span::styled("[v]", Style::default().fg(super::ACCENT)),

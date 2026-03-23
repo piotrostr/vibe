@@ -44,9 +44,9 @@ Logs are written to `~/.vibe/vibe.log`.
 
 ```bash
 vibe                          # open the TUI kanban board
-vibe create --title "..." --description "..." [--gas-it]  # create ticket (+ spawn cousin)
-vibe gas VIB-23               # spawn cousin for existing task (by Linear ID, title, or UUID)
-vibe import plan.md --title "..." [--gas-it]  # import markdown plan as task (+ spawn cousin)
+vibe create --title "..." --description "..." [--gas-it] [--with-prime]  # create ticket (+ spawn cousin)
+vibe gas VIB-23 [--with-prime]  # spawn cousin for existing task (by Linear ID, title, or UUID)
+vibe import plan.md --title "..." [--gas-it] [--with-prime]  # import markdown plan as task (+ spawn cousin)
 vibe status                   # show Linear board state grouped by column
 vibe cleanup [target]         # tear down finished sessions (launchd + zellij)
 cousin list                   # list active cousins for this project
@@ -100,7 +100,7 @@ Background loading uses `tokio::task::spawn_blocking` with mpsc channels to avoi
 
 View-specific bindings in `input/keybindings.rs`. Global: `q` quit, `?` help, `/` search, `Esc` back.
 
-Kanban: `j/k` navigate, `J/K` change columns, `g` launch session, `p` launch with plan mode, `e` edit, `c` create, `d` delete, `v` view PR, `w` worktrees, `S` sessions.
+Kanban: `j/k` navigate, `J/K` change columns, `g` launch session, `G` launch with prime context, `p` launch with plan mode, `e` edit, `c` create, `d` delete, `v` view PR, `w` worktrees, `S` sessions.
 
 ### Task Storage Format
 

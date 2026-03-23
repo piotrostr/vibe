@@ -71,16 +71,28 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
             spans.push(Span::raw("  "));
             if claude_count > 0 {
                 spans.push(Span::styled("Claude: ", Style::default().fg(Color::White)));
-                spans.push(Span::styled(format!("{}", claude_count), Style::default().fg(super::ACCENT)));
+                spans.push(Span::styled(
+                    format!("{}", claude_count),
+                    Style::default().fg(super::ACCENT),
+                ));
             } else {
-                spans.push(Span::styled("Claude: 0", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    "Claude: 0",
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
             spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
             if zellij_count > 0 {
                 spans.push(Span::styled("Zellij: ", Style::default().fg(Color::White)));
-                spans.push(Span::styled(format!("{}", zellij_count), Style::default().fg(Color::Green)));
+                spans.push(Span::styled(
+                    format!("{}", zellij_count),
+                    Style::default().fg(Color::Green),
+                ));
             } else {
-                spans.push(Span::styled("Zellij: 0", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(
+                    "Zellij: 0",
+                    Style::default().fg(Color::DarkGray),
+                ));
             }
             // Show loading indicator when refreshing
             if state.pr_loading || state.worktrees.loading || state.sessions.loading {
@@ -93,13 +105,21 @@ fn render_header_with_logo(frame: &mut Frame, area: Rect, state: &AppState) {
         } else if i == 1 && !project_info.is_empty() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled("Project: ", Style::default().fg(Color::White)));
-            let project_name_display = project_info.strip_prefix("Project: ").unwrap_or(&project_info);
-            spans.push(Span::styled(project_name_display.to_string(), Style::default().fg(super::ACCENT)));
+            let project_name_display = project_info
+                .strip_prefix("Project: ")
+                .unwrap_or(&project_info);
+            spans.push(Span::styled(
+                project_name_display.to_string(),
+                Style::default().fg(super::ACCENT),
+            ));
         } else if i == 2 {
             if let Some((ref env_var, status, label_color)) = linear_info {
                 spans.push(Span::raw("  "));
                 spans.push(Span::styled("Linear: ", Style::default().fg(Color::White)));
-                spans.push(Span::styled(format!("{} {}", env_var, status), Style::default().fg(label_color)));
+                spans.push(Span::styled(
+                    format!("{} {}", env_var, status),
+                    Style::default().fg(label_color),
+                ));
             }
             // Prime session indicator
             spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
@@ -275,6 +295,7 @@ pub fn render_help_modal(frame: &mut Frame, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )]),
         Line::from("  g                  Gas it (launch Claude)"),
+        Line::from("  G                  Gas it with prime"),
         Line::from("  p                  Plan it (launch in plan mode)"),
         Line::from("  P                  Prime session (war room)"),
         Line::from("  v                  View PR"),

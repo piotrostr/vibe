@@ -11,13 +11,14 @@ use crate::external::{
     count_active_sessions, edit_markdown, get_all_open_prs, get_pr_for_branch,
     launch_prime_session, launch_zellij_claude_in_worktree,
     launch_zellij_claude_in_worktree_with_context, list_sessions_with_status, list_worktrees,
-    prime_session_name, rapporting_instructions,
+    prime_session_name,
 };
 use crate::input::{Action, EventStream, extract_key_event, key_to_action};
 use crate::state::{
     AppState, Modal, View, check_linear_api_key, linear_env_var_name, task_title_to_branch,
 };
 use crate::storage::TaskStorage;
+use crate::task_prompt::{PullRequestContext, TaskPromptOptions, build_task_prompt};
 use crate::terminal::Terminal;
 use crate::ui::{
     render_footer, render_header, render_help_modal, render_kanban_board, render_logs,
@@ -703,10 +704,13 @@ impl App {
                 // TODO: Implement worktree switching
             }
             Action::LaunchSession => {
-                self.handle_launch_session(terminal, false)?;
+                self.handle_launch_session(terminal, false, false)?;
             }
             Action::LaunchSessionPlan => {
-                self.handle_launch_session(terminal, true)?;
+                self.handle_launch_session(terminal, true, false)?;
+            }
+            Action::LaunchSessionWithPrime => {
+                self.handle_launch_session(terminal, false, true)?;
             }
             Action::LaunchPrime => {
                 self.handle_launch_prime(terminal)?;
@@ -1029,11 +1033,11 @@ impl App {
             }
             View::TaskDetail => {
                 // Launch session for task
-                self.handle_launch_session(terminal, false)?;
+                self.handle_launch_session(terminal, false, false)?;
             }
             View::Worktrees => {
                 // Launch session in selected worktree
-                self.handle_launch_session(terminal, false)?;
+                self.handle_launch_session(terminal, false, false)?;
             }
             View::Logs => {
                 // Refresh logs on select
@@ -1363,7 +1367,12 @@ impl App {
         std::env::current_dir().ok()
     }
 
-    fn handle_launch_session(&mut self, terminal: &mut Terminal, plan_mode: bool) -> Result<()> {
+    fn handle_launch_session(
+        &mut self,
+        terminal: &mut Terminal,
+        plan_mode: bool,
+        with_prime: bool,
+    ) -> Result<()> {
         // Get project directory - required for wt to work
         let project_dir = match self.get_project_dir() {
             Some(dir) => {
@@ -1421,21 +1430,19 @@ impl App {
         let branch = task_title_to_branch(&task.title, task.linear_issue_id.as_deref());
 
         // Build task context for fresh sessions
-        let task_context = {
-            let mut context = format!("Task: {}", task.title);
-            if let Some(desc) = &task.description
-                && !desc.is_empty()
-            {
-                context.push_str(&format!("\n\nDescription:\n{}", desc));
-            }
-            context.push_str(&format!("\n\nBranch: {}", branch));
-            if let Some(pr_info) = self.state.worktrees.branch_prs.get(&branch) {
-                context.push_str(&format!("\nPR: {} ({})", pr_info.url, pr_info.state));
-            }
-            context.push_str("\n\nRun `just setup` if available to initialize the worktree environment.");
-            context.push_str(&rapporting_instructions(self.storage.project_name()));
-            context
-        };
+        let task_context = build_task_prompt(TaskPromptOptions {
+            title: &task.title,
+            description: task.description.as_deref(),
+            branch: &branch,
+            pull_request: self.state.worktrees.branch_prs.get(&branch).map(|pr_info| {
+                PullRequestContext {
+                    url: &pr_info.url,
+                    state: &pr_info.state,
+                }
+            }),
+            project_name: self.storage.project_name(),
+            with_prime,
+        });
 
         // Suspend TUI, create worktree if needed, launch claude
         terminal.suspend()?;

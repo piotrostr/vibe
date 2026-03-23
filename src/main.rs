@@ -10,13 +10,15 @@ mod external;
 mod input;
 mod state;
 mod storage;
+mod task_prompt;
 mod terminal;
 mod ui;
 
 use app::App;
-use external::{AssistantCli, LinearClient, launch_headless_in_worktree, rapporting_instructions};
+use external::{AssistantCli, LinearClient, launch_headless_in_worktree};
 use state::task_title_to_branch;
 use storage::TaskStorage;
+use task_prompt::{TaskPromptOptions, build_task_prompt};
 use terminal::Terminal;
 
 #[derive(Parser)]
@@ -46,6 +48,10 @@ enum Command {
         /// Immediately spawn a Claude session for the task
         #[arg(long)]
         gas_it: bool,
+
+        /// Include vibe/prime rapporting instructions in the first prompt
+        #[arg(long, requires = "gas_it")]
+        with_prime: bool,
     },
     /// Import a task from a markdown file
     Import {
@@ -59,6 +65,10 @@ enum Command {
         /// Immediately spawn a Claude session for the task
         #[arg(long)]
         gas_it: bool,
+
+        /// Include vibe/prime rapporting instructions in the first prompt
+        #[arg(long, requires = "gas_it")]
+        with_prime: bool,
     },
     /// Tear down finished sessions (launchd + zellij + worktree)
     Cleanup {
@@ -69,6 +79,10 @@ enum Command {
     Gas {
         /// Task identifier: Linear ID (VIB-23), task title substring, or UUID
         target: String,
+
+        /// Include vibe/prime rapporting instructions in the first prompt
+        #[arg(long)]
+        with_prime: bool,
     },
     /// Show Linear board state grouped by column
     Status,
@@ -83,6 +97,7 @@ async fn main() -> Result<()> {
             title,
             description,
             gas_it,
+            with_prime,
         }) => {
             let storage = TaskStorage::from_cwd()?;
             let project_name = storage.project_name().to_string();
@@ -119,15 +134,14 @@ async fn main() -> Result<()> {
                 let project_dir = std::env::current_dir()?;
                 let branch = task_title_to_branch(&title, linear_id.as_deref());
 
-                let mut context = format!("Task: {}", title);
-                if let Some(desc) = &task_desc
-                    && !desc.is_empty()
-                {
-                    context.push_str(&format!("\n\nDescription:\n{}", desc));
-                }
-                context.push_str(&format!("\n\nBranch: {}", branch));
-                context.push_str("\n\nRun `just setup` if available to initialize the worktree environment.");
-                context.push_str(&rapporting_instructions(&project_name));
+                let context = build_task_prompt(TaskPromptOptions {
+                    title: &title,
+                    description: task_desc.as_deref(),
+                    branch: &branch,
+                    pull_request: None,
+                    project_name: &project_name,
+                    with_prime,
+                });
 
                 let assistant = if cli.codex {
                     AssistantCli::Codex
@@ -136,19 +150,21 @@ async fn main() -> Result<()> {
                 };
 
                 println!("Launching session...");
-                launch_headless_in_worktree(
-                    &branch,
-                    &context,
-                    assistant,
-                    &project_dir,
-                )?;
-                println!("Session spawned headlessly. Attach with: zellij attach {}",
-                    external::session_name_for_branch(&branch));
+                launch_headless_in_worktree(&branch, &context, assistant, &project_dir)?;
+                println!(
+                    "Session spawned headlessly. Attach with: zellij attach {}",
+                    external::session_name_for_branch(&branch)
+                );
             }
 
             Ok(())
         }
-        Some(Command::Import { file, title: title_override, gas_it }) => {
+        Some(Command::Import {
+            file,
+            title: title_override,
+            gas_it,
+            with_prime,
+        }) => {
             let storage = TaskStorage::from_cwd()?;
             let project_name = storage.project_name().to_string();
 
@@ -198,15 +214,14 @@ async fn main() -> Result<()> {
                 let project_dir = std::env::current_dir()?;
                 let branch = task_title_to_branch(&title, linear_id.as_deref());
 
-                let mut context = format!("Task: {}", title);
-                if let Some(desc) = &task_desc
-                    && !desc.is_empty()
-                {
-                    context.push_str(&format!("\n\nDescription:\n{}", desc));
-                }
-                context.push_str(&format!("\n\nBranch: {}", branch));
-                context.push_str("\n\nRun `just setup` if available to initialize the worktree environment.");
-                context.push_str(&rapporting_instructions(&project_name));
+                let context = build_task_prompt(TaskPromptOptions {
+                    title: &title,
+                    description: task_desc.as_deref(),
+                    branch: &branch,
+                    pull_request: None,
+                    project_name: &project_name,
+                    with_prime,
+                });
 
                 let assistant = if cli.codex {
                     AssistantCli::Codex
@@ -215,14 +230,11 @@ async fn main() -> Result<()> {
                 };
 
                 println!("Launching session...");
-                launch_headless_in_worktree(
-                    &branch,
-                    &context,
-                    assistant,
-                    &project_dir,
-                )?;
-                println!("Session spawned headlessly. Attach with: zellij attach {}",
-                    external::session_name_for_branch(&branch));
+                launch_headless_in_worktree(&branch, &context, assistant, &project_dir)?;
+                println!(
+                    "Session spawned headlessly. Attach with: zellij attach {}",
+                    external::session_name_for_branch(&branch)
+                );
             }
 
             Ok(())
@@ -231,7 +243,7 @@ async fn main() -> Result<()> {
             cmd_cleanup(target.as_deref())?;
             Ok(())
         }
-        Some(Command::Gas { target }) => {
+        Some(Command::Gas { target, with_prime }) => {
             let storage = TaskStorage::from_cwd()?;
             let project_name = storage.project_name().to_string();
             let tasks = storage.list_tasks()?;
@@ -245,9 +257,7 @@ async fn main() -> Result<()> {
                         .as_ref()
                         .is_some_and(|id| id.to_uppercase() == upper)
                 })
-                .or_else(|| {
-                    tasks.iter().find(|t| t.id == target)
-                })
+                .or_else(|| tasks.iter().find(|t| t.id == target))
                 .or_else(|| {
                     tasks
                         .iter()
@@ -257,17 +267,14 @@ async fn main() -> Result<()> {
 
             let branch = task_title_to_branch(&task.title, task.linear_issue_id.as_deref());
 
-            let mut context = format!("Task: {}", task.title);
-            if let Some(desc) = &task.description
-                && !desc.is_empty()
-            {
-                context.push_str(&format!("\n\nDescription:\n{}", desc));
-            }
-            context.push_str(&format!("\n\nBranch: {}", branch));
-            context.push_str(
-                "\n\nRun `just setup` if available to initialize the worktree environment.",
-            );
-            context.push_str(&rapporting_instructions(&project_name));
+            let context = build_task_prompt(TaskPromptOptions {
+                title: &task.title,
+                description: task.description.as_deref(),
+                branch: &branch,
+                pull_request: None,
+                project_name: &project_name,
+                with_prime,
+            });
 
             let assistant = if cli.codex {
                 AssistantCli::Codex
@@ -275,9 +282,11 @@ async fn main() -> Result<()> {
                 AssistantCli::Claude
             };
 
-            println!("Gassing: {} {}",
+            println!(
+                "Gassing: {} {}",
                 task.linear_issue_id.as_deref().unwrap_or(""),
-                task.title);
+                task.title
+            );
             launch_headless_in_worktree(&branch, &context, assistant, &std::env::current_dir()?)?;
             println!(
                 "Session spawned. Attach with: zellij attach {}",
@@ -320,9 +329,7 @@ fn cmd_cleanup(target: Option<&str>) -> Result<()> {
     // Resolve which sessions to clean up
     let sessions: Vec<String> = if let Some(target) = target {
         // Specific target: resolve like cousin does (ticket ID or raw name)
-        let output = Cmd::new("zellij")
-            .args(["list-sessions", "-s"])
-            .output()?;
+        let output = Cmd::new("zellij").args(["list-sessions", "-s"]).output()?;
         let all: Vec<String> = String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|l| !l.is_empty())
@@ -340,9 +347,7 @@ fn cmd_cleanup(target: Option<&str>) -> Result<()> {
         matches
     } else {
         // No target: clean up all EXITED sessions for this project
-        let output = Cmd::new("zellij")
-            .args(["list-sessions"])
-            .output()?;
+        let output = Cmd::new("zellij").args(["list-sessions"]).output()?;
         let raw = String::from_utf8_lossy(&output.stdout).to_string();
         // Strip ANSI
         let stripped: String = {
@@ -352,7 +357,9 @@ fn cmd_cleanup(target: Option<&str>) -> Result<()> {
                 if c == '\x1b' {
                     while let Some(&next) = chars.peek() {
                         chars.next();
-                        if next.is_ascii_alphabetic() { break; }
+                        if next.is_ascii_alphabetic() {
+                            break;
+                        }
                     }
                 } else {
                     result.push(c);
@@ -377,14 +384,18 @@ fn cmd_cleanup(target: Option<&str>) -> Result<()> {
         // 1. Unload launchd plist
         let plist = launchd_dir.join(format!("com.vibe.headless.{}.plist", session));
         if plist.exists() {
-            let _ = Cmd::new("launchctl").args(["unload", plist.to_str().unwrap()]).output();
+            let _ = Cmd::new("launchctl")
+                .args(["unload", plist.to_str().unwrap()])
+                .output();
             let _ = std::fs::remove_file(&plist);
             println!("  unloaded launchd: {}", session);
         }
 
         // 2. Kill + delete zellij session
         let _ = Cmd::new("zellij").args(["kill-session", session]).output();
-        let _ = Cmd::new("zellij").args(["delete-session", session]).output();
+        let _ = Cmd::new("zellij")
+            .args(["delete-session", session])
+            .output();
         println!("  removed session: {}", session);
     }
 
@@ -394,14 +405,10 @@ fn cmd_cleanup(target: Option<&str>) -> Result<()> {
 
 async fn cmd_status() -> Result<()> {
     let storage = TaskStorage::from_cwd()?;
-    let project = storage
-        .project_name()
-        .to_uppercase()
-        .replace('-', "_");
+    let project = storage.project_name().to_uppercase().replace('-', "_");
     let env_var = format!("{}_LINEAR_API_KEY", project);
 
-    let api_key = std::env::var(&env_var)
-        .map_err(|_| anyhow::anyhow!("{} not set", env_var))?;
+    let api_key = std::env::var(&env_var).map_err(|_| anyhow::anyhow!("{} not set", env_var))?;
 
     let client = LinearClient::new(api_key);
     let issues = client
@@ -452,4 +459,34 @@ fn init_tracing() -> Result<()> {
         .init();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command};
+    use clap::Parser;
+
+    #[test]
+    fn create_requires_gas_it_for_with_prime() {
+        let result = Cli::try_parse_from(["vibe", "create", "--title", "test", "--with-prime"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn import_requires_gas_it_for_with_prime() {
+        let result = Cli::try_parse_from(["vibe", "import", "plan.md", "--with-prime"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn gas_accepts_with_prime() {
+        let cli = Cli::try_parse_from(["vibe", "gas", "VIB-23", "--with-prime"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Gas {
+                with_prime: true,
+                ..
+            })
+        ));
+    }
 }

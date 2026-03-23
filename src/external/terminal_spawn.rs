@@ -482,9 +482,7 @@ pub fn launch_prime_session(
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         .unwrap_or_default();
 
-    let session_line = session_output
-        .lines()
-        .find(|l| l.contains(&session_name));
+    let session_line = session_output.lines().find(|l| l.contains(&session_name));
     let session_alive = session_line.is_some_and(|l| !l.contains("EXITED"));
     let session_exited = session_line.is_some_and(|l| l.contains("EXITED"));
 
@@ -521,8 +519,7 @@ pub fn launch_prime_session(
             }
         };
 
-        let _launcher =
-            create_launcher_script(&session_name, &fresh_cmd, &continue_cmd, false)?;
+        let _launcher = create_launcher_script(&session_name, &fresh_cmd, &continue_cmd, false)?;
 
         // Use continue script if resuming a dead session, fresh if brand new
         let shell_script = if session_exited {

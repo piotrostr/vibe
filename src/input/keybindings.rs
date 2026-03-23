@@ -151,6 +151,7 @@ fn kanban_bindings(key: KeyEvent) -> Option<Action> {
 
         // Launch Claude Code session
         (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Action::LaunchSession),
+        (KeyCode::Char('G'), KeyModifiers::SHIFT) => Some(Action::LaunchSessionWithPrime),
         (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Action::LaunchSessionPlan),
         (KeyCode::Char('v'), KeyModifiers::NONE) => Some(Action::ViewPR),
         (KeyCode::Char('b'), KeyModifiers::NONE) => Some(Action::BindPR),
@@ -182,6 +183,7 @@ fn task_detail_bindings(key: KeyEvent) -> Option<Action> {
         (KeyCode::Char('h') | KeyCode::Left, _) => Some(Action::Back),
         (KeyCode::Char('e'), KeyModifiers::NONE) => Some(Action::EditTask),
         (KeyCode::Char('g'), KeyModifiers::NONE) => Some(Action::LaunchSession),
+        (KeyCode::Char('G'), KeyModifiers::SHIFT) => Some(Action::LaunchSessionWithPrime),
         (KeyCode::Char('p'), KeyModifiers::NONE) => Some(Action::LaunchSessionPlan),
         (KeyCode::Char('P'), KeyModifiers::SHIFT) => Some(Action::ViewPlan),
         (KeyCode::Char('v'), KeyModifiers::NONE) => Some(Action::ViewPR),

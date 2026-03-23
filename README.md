@@ -65,6 +65,14 @@ Use Codex instead of Claude Code:
 vibe --codex
 ```
 
+Spawn a task session with the plain task prompt by default, or opt into the cousin/prime appendix explicitly:
+
+```bash
+vibe gas VIB-23
+vibe gas VIB-23 --with-prime
+vibe create --title "..." --gas-it --with-prime
+```
+
 ### Key Bindings
 
 | Key | Action |
@@ -73,6 +81,7 @@ vibe --codex
 | `h/l` | Switch columns |
 | `J/K` | Move task between columns |
 | `g` | Launch coding session for task |
+| `G` | Launch coding session with prime instructions |
 | `p` | Launch with plan mode |
 | `Enter` | View task details |
 | `c` | Create new task |

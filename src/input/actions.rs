@@ -20,6 +20,7 @@ pub enum Action {
 
     LaunchSession,
     LaunchSessionPlan,
+    LaunchSessionWithPrime,
     ViewPR,
     ViewPlan,
     BindPR,
